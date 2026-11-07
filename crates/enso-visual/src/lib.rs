@@ -10,7 +10,7 @@
 //!                          alpha ────┘        │
 //!                                             ├─ interpolates camera, time, transforms, poses, knobs
 //!                                             └─ subrenderers (private), drawn in order:
-//!                                                  sky, static meshes, skinned meshes
+//!                                                  sky, static meshes, skinned meshes, text
 //! ```
 //!
 //! * [`Renderer`] is the interface: resource creation (returning IDs) and
@@ -40,6 +40,7 @@ pub mod skinned_mesh;
 pub mod sky;
 pub mod static_mesh;
 mod subrenderer;
+pub mod text;
 mod texture;
 mod transform;
 mod world;
@@ -49,7 +50,10 @@ mod world;
 pub use camera::Camera;
 pub use error::RenderError;
 pub use gpu::{Gpu, GpuError};
-pub use ids::{MaterialId, MeshId, MeshShaderId, SkeletonId, SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextureId};
+pub use ids::{
+    FontId, MaterialId, MeshId, MeshShaderId, SkeletonId, SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextShaderId,
+    TextureId,
+};
 pub use material::{MAX_TEXTURES, MaterialDesc, MaterialShader};
 pub use offscreen::OffscreenTarget;
 pub use params::{Param, ParamInfo, ParamKind, ParamType};
@@ -66,6 +70,7 @@ pub use {glam, wgpu};
 use skinned_mesh::{SkeletonDesc, SkinnedMeshData};
 use sky::SkyShaderDesc;
 use static_mesh::MeshData;
+use text::FontDesc;
 
 /// The renderer interface.
 ///
@@ -174,6 +179,24 @@ pub trait Renderer {
     fn update_sky_shader(&mut self, id: SkyShaderId, desc: &SkyShaderDesc<'_>) -> Result<(), RenderError>;
 
     fn destroy_sky_shader(&mut self, id: SkyShaderId);
+
+    // ---- text ----
+
+    /// Parse a font and build its MSDF atlas for `desc.chars` (CPU work:
+    /// tens of milliseconds for a few hundred glyphs).
+    fn create_font(&mut self, desc: &FontDesc<'_>) -> Result<FontId, RenderError>;
+
+    fn destroy_font(&mut self, id: FontId);
+
+    /// Compile a shader against the text contract ([`text::PRELUDE`]).
+    /// Text is always double-sided; use a blended [`BlendMode`].
+    fn create_text_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<TextShaderId, RenderError>;
+
+    /// Recompile a text shader in place, keeping its ID. On error the
+    /// previous version keeps running.
+    fn update_text_shader(&mut self, id: TextShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError>;
+
+    fn destroy_text_shader(&mut self, id: TextShaderId);
 
     // ---- the frame ----
 

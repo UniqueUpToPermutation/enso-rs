@@ -109,6 +109,18 @@ sky draws first with REPLACE over a fullscreen triangle. A sky shader whose
 source mentions `discard` falls back to `Clear`, so pixels are never left
 undefined. Keep this invariant if the sky's draw order or blending changes.
 
+**2026-11-07: MSDF text subrenderer.** (Owner's choice among egui /
+glyphon / MSDF.) Text is scene geometry: one instanced quad per glyph,
+shaded from an MSDF atlas, so it stays sharp at any size and angle, and
+outlines and glows are shader maths. It uses materials and named
+parameters like everything else. The atlas is built at runtime with `fdsm`
+(pure Rust) from `ttf-parser` outlines, through our own outline adapter
+instead of the `fdsm-ttf-parser` crate. Simple layout (lines and
+alignment, no kerning or shaping). egui will handle control-UI text, and
+glyphon remains an option for tiny overlay text. The example font is
+**Noto Sans** (OFL): Inter was tried first, but its overlapping contours
+break fdsm's output.
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.
@@ -121,3 +133,6 @@ undefined. Keep this invariant if the sky's draw order or blending changes.
 - `// @range(a, b) @default(x)` comment annotations on parameter fields for
   GUI sliders and defaults.
 - egui control panel generated from `material_params` / `instance_params`.
+- Text: kerning (GPOS via a shaper), cosmic-text layout (shaping,
+  wrapping, fallback fonts), overlap removal before MSDF generation,
+  caching atlases to disk, vertical alignment options.

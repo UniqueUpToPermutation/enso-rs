@@ -25,6 +25,9 @@ renderer.create_skinned_shader(&ShaderDesc) -> Result<SkinnedShaderId>
 renderer.update_skinned_shader(id, &ShaderDesc) -> Result<()>
 renderer.create_material(&MaterialDesc::new(mesh_or_skinned_shader)) -> Result<MaterialId>
     // .with_param("base_color", Vec3::ONE) sets a `struct Material` default
+renderer.create_font(&FontDesc::new("Noto Sans", ttf_bytes)) -> Result<FontId>   // builds the MSDF atlas
+renderer.create_text_shader(&ShaderDesc) -> Result<TextShaderId>
+renderer.update_text_shader(id, &ShaderDesc) -> Result<()>
 renderer.create_sky_shader(&SkyShaderDesc) -> Result<SkyShaderId>
 renderer.update_sky_shader(id, &SkyShaderDesc) -> Result<()>
 renderer.destroy_*(id)
@@ -40,6 +43,7 @@ world.camera / world.time / world.clear_color
 world.sky = Some(sky_material)          // a material of a sky shader; kept by clear()
 world.draw_mesh(MeshDraw::new(mesh, material, transform).with_key(k)).with(velocity, 0.8).with(age, 0.1)
 world.draw_skinned(SkinnedDraw::new(mesh, skeleton, material, transform).with_key(k), &pose).with(..)
+world.draw_text(TextDraw::new(font, material, transform).with_size(0.5).with_align(TextAlign::Center), "C#").with(..)
 world.set_param(material, decay, 2.5)
 
 // Per display frame
@@ -70,6 +74,10 @@ Per-subrenderer contract types live in `static_mesh::`, `skinned_mesh::`, `sky::
 | `src/skinned_mesh/geometry.rs` | `SkinnedVertex`, `SkinnedMeshData::tube` + tests |
 | `src/skinned_mesh/renderer.rs` | Private `SkinnedMeshRenderer`: pose interpolation, joint storage buffer, batching |
 | `src/sky/` | `SkyShaderDesc`, `PRELUDE` (fixed `sky_vs_main` outputting `SkyIn { view_dir, uv, ndc }`); private `SkyRenderer` (draws `world.sky`'s material) |
+| `src/text/mod.rs` | `FontDesc`, `TextDraw`, `TextAlign`, `DEFAULT_CHARS`, `PRELUDE` |
+| `src/text/font.rs` | `FontAtlas`: ttf-parser outline → fdsm MSDF (f32, sign + error correction, flipped to top-down) → shelf-packed RGBA8 atlas; `layout()` (lines, alignment, `?` fallback) + tests |
+| `src/text/prelude.wgsl` | Text contract: `GlyphIn` (loc 0-8), `glyph_corner()`, `text_screen_distance/coverage/max_reach_px()`, groups 2 (font) and 3 (instances) |
+| `src/text/renderer.rs` | Private `TextRenderer`: fonts (atlas texture + bind group), shaders, one instance per glyph, `draw(0..6, ..)` per batch |
 | `src/offscreen.rs` | `OffscreenTarget`: render into a texture, `read_pixels` back to the CPU |
 | `examples/common/mod.rs` | Example harness: `Example` trait, `Setup`, `Simulation`, shader hot reload, helpers |
 | `examples/common/window.rs` | Interactive winit window + real-time loop (`common::run`) |
@@ -79,6 +87,8 @@ Per-subrenderer contract types live in `static_mesh::`, `skinned_mesh::`, `sky::
 | `examples/sky.rs` | Gradient sky with a moving sun behind a ring of cubes |
 | `examples/tentacles.rs` | Skinned tubes on joint chains, swaying with travelling waves |
 | `examples/notes.rs` | Named parameters: keys struck by a melody (material + instance structs) and sparks (a second shader with a different `Instance` stride) |
+| `examples/text.rs` | MSDF text: waving outlined title, subtitle, ring of note names lit by a playhead, over a sky |
+| `examples/fonts/` | Noto Sans Regular + its OFL licence (used by the text example and font tests) |
 | `tests/examples_have_golden_tests.rs` | Guard: every example is registered as a golden test |
 
 ## Example harness
@@ -153,15 +163,16 @@ declare them, since the preludes bind both):
 | static mesh | `MATERIAL_WGSL`, `static_mesh::PRELUDE` | `vs_main(VertexIn, InstanceIn)`, `fs_main`; optional `struct Material`, `struct Instance` |
 | skinned mesh | `MATERIAL_WGSL`, `skinned_mesh::PRELUDE` | `vs_main(SkinnedVertexIn, InstanceIn)`, `fs_main`; optional structs |
 | sky | `MATERIAL_WGSL`, `sky::PRELUDE` (contains `sky_vs_main`) | `fs_main(SkyIn)`; optional `struct Material` |
+| text | `MATERIAL_WGSL`, `text::PRELUDE` | `vs_main(@builtin(vertex_index) u32, GlyphIn)`, `fs_main`; optional structs |
 
 Bind groups:
 
-| Group | Static mesh | Skinned mesh | Sky |
-|---|---|---|---|
-| 0 | globals | globals | globals |
-| 1 | material (uniform `Material` + sampler + 4 textures) | material | material |
-| 2 | `instances: array<Instance>` (storage) | joint matrices (storage) | |
-| 3 | | `instances: array<Instance>` (storage) | |
+| Group | Static mesh | Skinned mesh | Sky | Text |
+|---|---|---|---|---|
+| 0 | globals | globals | globals | globals |
+| 1 | material (uniform `Material` + sampler + 4 textures) | material | material | material |
+| 2 | `instances: array<Instance>` (storage) | joint matrices (storage) | | font atlas + sampler + `FontInfo { px_range }` |
+| 3 | | `instances: array<Instance>` (storage) | | `instances` |
 
 (Default `max_bind_groups` is 4: a new group needs care.)
 Rust ↔ WGSL layouts must match byte for byte: `GlobalsUniform` ↔ `Globals`,
@@ -204,8 +215,9 @@ globals + parts length. Mapping them back to the user file is a known TODO.
    otherwise `Clear(clear_color)`. Depth is always cleared to 1.0.
    One render pass; `draw()` on each subrenderer in
    order: **sky first** (depth `Always`, no depth write), then static,
-   then skinned meshes. Drawing the sky last at depth 1.0 would save
-   overdraw but would paint over blended meshes (they don't write depth).
+   then skinned meshes, then **text** (blended, so last). Drawing the sky
+   last at depth 1.0 would save overdraw but would paint over blended
+   meshes (they don't write depth).
 5. Submit. The caller presents.
 
 ## Interpolation semantics
@@ -256,6 +268,33 @@ globals + parts length. Mapping them back to the user file is a known TODO.
 - The sky uses the same mechanism: `MaterialShader::Sky`, `struct Material`
   in the sky shader, `world.set_param(sky_material, ..)`.
   `instance_params` of a sky material is an empty list.
+
+## Text (MSDF)
+
+- `create_font` parses the font (ttf-parser) and, per character in
+  `FontDesc::chars`, builds an fdsm shape from the outline (in font y-up
+  orientation, offset into bitmap pixels), colours edges
+  (`edge_coloring_simple(0.03)`), generates an f32 MSDF, applies sign and
+  error correction, converts it to u8, and flips it top-down. Bitmaps are
+  shelf-packed into a 1024-wide `Rgba8Unorm` atlas (linear, not sRGB).
+  Glyph metrics are stored in ems; `TextDraw::size` = world units per em.
+- Encoding: pixel = distance/`range_px` + 0.5 (so `px_range` = full range).
+  `text_screen_px_range` converts that to screen pixels via `fwidth(uv)`.
+  **Outlines/glows must clamp to `text_max_reach_px(uv)`**: beyond the
+  stored range distances saturate, and small or edge-on text would turn
+  into solid boxes (this happened in the first render of the example).
+- Layout: per frame, per draw, `FontAtlas::layout` (lines on `\n`,
+  alignment, `index` counts every char incl. spaces/newlines, missing → `?`).
+  No kerning, no shaping, no wrapping. cosmic-text would be the upgrade.
+- Each glyph is an instance (`GlyphRaw`) with no vertex buffer: 6 vertices
+  from `vertex_index`. All glyphs of a draw get the same `Instance` block.
+  Text pipelines are forced double-sided.
+- **Fonts with overlapping contours** (e.g. Inter as shipped) produce
+  spikes and specks at stroke joins: fdsm has no overlap support. The
+  example uses Noto Sans (overlaps removed) for that reason. A real fix =
+  boolean-union the outlines before generating (not implemented).
+- Debugging an atlas: dump `FontAtlas::pixels` to a PNG (RGBA) and look.
+  Clean MSDFs have smooth bands; artifacts show as specks at corners.
 
 ## Skinning model
 

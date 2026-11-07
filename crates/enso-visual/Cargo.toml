@@ -7,15 +7,18 @@ license.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
+fdsm.workspace = true
 glam.workspace = true
+# fdsm writes distance fields into `image` buffers (also used by golden tests).
+image.workspace = true
 log.workspace = true
 pollster.workspace = true
 thiserror.workspace = true
+ttf-parser.workspace = true
 wgpu.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
-image.workspace = true
 winit.workspace = true
 
 # Every example is also built as a test (`test = true`), so `cargo test` runs
@@ -35,4 +38,8 @@ test = true
 
 [[example]]
 name = "notes"
+test = true
+
+[[example]]
+name = "text"
 test = true

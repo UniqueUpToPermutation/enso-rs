@@ -10,6 +10,7 @@ use crate::{
     params::{Param, ParamName, ParamType, ParamValue},
     skinned_mesh::SkinnedDraw,
     static_mesh::MeshDraw,
+    text::TextDraw,
 };
 
 /// A slice of one of `RenderWorld`'s packed arrays (poses, instance values).
@@ -64,6 +65,8 @@ pub struct RenderWorld {
     pub meshes: Vec<MeshDraw>,
     /// Skinned mesh instances. Add with [`draw_skinned`](Self::draw_skinned).
     pub skinned: Vec<SkinnedDraw>,
+    /// Text. Add with [`draw_text`](Self::draw_text).
+    pub texts: Vec<TextDraw>,
 
     /// Material parameter values set this tick ([`set_param`](Self::set_param)).
     pub(crate) material_values: HashMap<(MaterialId, ParamName), ParamValue>,
@@ -71,6 +74,8 @@ pub struct RenderWorld {
     instance_values: Vec<(ParamName, ParamValue)>,
     /// Joint transforms of every skinned draw, packed.
     poses: Vec<Transform>,
+    /// The strings of every text draw, packed (spans are byte ranges).
+    strings: String,
 }
 
 impl Default for RenderWorld {
@@ -82,9 +87,11 @@ impl Default for RenderWorld {
             sky: None,
             meshes: Vec::new(),
             skinned: Vec::new(),
+            texts: Vec::new(),
             material_values: HashMap::new(),
             instance_values: Vec::new(),
             poses: Vec::new(),
+            strings: String::new(),
         }
     }
 }
@@ -99,9 +106,11 @@ impl RenderWorld {
     pub fn clear(&mut self) {
         self.meshes.clear();
         self.skinned.clear();
+        self.texts.clear();
         self.material_values.clear();
         self.instance_values.clear();
         self.poses.clear();
+        self.strings.clear();
     }
 
     /// Set a field of a material's `struct Material` for this tick.
@@ -138,6 +147,21 @@ impl RenderWorld {
         InstanceParams { values: &mut self.instance_values, span: &mut self.skinned.last_mut().unwrap().params }
     }
 
+    /// Draw `text`. Chain [`with`](InstanceParams::with) to set the text
+    /// shader's `struct Instance` fields (shared by all its glyphs).
+    pub fn draw_text(&mut self, mut draw: TextDraw, text: &str) -> InstanceParams<'_> {
+        draw.text = Span { start: self.strings.len() as u32, len: text.len() as u32 };
+        self.strings.push_str(text);
+        draw.params = Span { start: self.instance_values.len() as u32, len: 0 };
+        self.texts.push(draw);
+        InstanceParams { values: &mut self.instance_values, span: &mut self.texts.last_mut().unwrap().params }
+    }
+
+    pub(crate) fn text_of(&self, draw: &TextDraw) -> &str {
+        let start = draw.text.start as usize;
+        self.strings.get(start..start + draw.text.len as usize).unwrap_or("")
+    }
+
     pub(crate) fn pose_of(&self, draw: &SkinnedDraw) -> &[Transform] {
         draw.pose.of(&self.poses)
     }
@@ -148,8 +172,8 @@ impl RenderWorld {
 }
 
 /// Sets per-instance parameters of the draw just added. Returned by
-/// [`RenderWorld::draw_mesh`] and [`RenderWorld::draw_skinned`]; ignoring it
-/// is fine (the instance then gets zeros).
+/// [`RenderWorld::draw_mesh`], [`RenderWorld::draw_skinned`] and
+/// [`RenderWorld::draw_text`]; ignoring it is fine (the instance then gets zeros).
 pub struct InstanceParams<'w> {
     values: &'w mut Vec<(ParamName, ParamValue)>,
     span: &'w mut Span,

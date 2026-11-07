@@ -6,8 +6,10 @@ use enso_visual::{
     SkeletonId,
     SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextureDesc, TextureId, Transform,
     skinned_mesh::{SkeletonDesc, SkinnedMeshData},
+    FontId, TextShaderId,
     sky::SkyShaderDesc,
     static_mesh::{MeshData, MeshDraw},
+    text::FontDesc,
 };
 
 /// A fake renderer that records what it was asked to do.
@@ -88,6 +90,18 @@ impl Renderer for Recording {
         Ok(())
     }
     fn destroy_sky_shader(&mut self, _: SkyShaderId) {}
+
+    fn create_font(&mut self, _: &FontDesc<'_>) -> Result<FontId, RenderError> {
+        Ok(FontId::next())
+    }
+    fn destroy_font(&mut self, _: FontId) {}
+    fn create_text_shader(&mut self, _: &ShaderDesc<'_>) -> Result<TextShaderId, RenderError> {
+        Ok(TextShaderId::next())
+    }
+    fn update_text_shader(&mut self, _: TextShaderId, _: &ShaderDesc<'_>) -> Result<(), RenderError> {
+        Ok(())
+    }
+    fn destroy_text_shader(&mut self, _: TextShaderId) {}
 
     fn render(&mut self, _: (), _prev: &RenderWorld, curr: &RenderWorld, _alpha: f32) {
         self.frames.push(curr.meshes.len());

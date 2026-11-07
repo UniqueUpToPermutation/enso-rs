@@ -110,20 +110,6 @@ pub(crate) fn mentions(source: &str, word: &str) -> bool {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::mentions;
-
-    #[test]
-    fn mentions_finds_words_outside_line_comments() {
-        assert!(mentions("if x < 0.0 { discard; }", "discard"));
-        assert!(!mentions("let y = 1.0; // we never discard", "discard"));
-        assert!(!mentions("let discarded = 1.0;", "discard"));
-        // Inside block comments it errs towards "yes", the safe answer.
-        assert!(mentions("/* discard */", "discard"));
-    }
-}
-
 /// Read the parameter struct bound at `@group(group) @binding(0)` from a
 /// composed shader source.
 pub(crate) fn reflect_params(label: &str, source: &str, group: u32) -> Result<ParamLayout, RenderError> {
@@ -217,4 +203,18 @@ pub(crate) fn mesh_pipeline(
             cache: None,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mentions;
+
+    #[test]
+    fn mentions_finds_words_outside_line_comments() {
+        assert!(mentions("if x < 0.0 { discard; }", "discard"));
+        assert!(!mentions("let y = 1.0; // we never discard", "discard"));
+        assert!(!mentions("let discarded = 1.0;", "discard"));
+        // Inside block comments it errs towards "yes", the safe answer.
+        assert!(mentions("/* discard */", "discard"));
+    }
 }

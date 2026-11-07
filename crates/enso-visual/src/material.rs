@@ -10,7 +10,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    Gpu, MaterialId, MeshShaderId, RenderError, RenderWorld, SkinnedShaderId, SkyShaderId, TextureId,
+    Gpu, MaterialId, MeshShaderId, RenderError, RenderWorld, SkinnedShaderId, SkyShaderId, TextShaderId, TextureId,
     params::{Param, ParamLayout, ParamName, ParamType, ParamValue},
     texture::{Texture, TextureDesc},
 };
@@ -24,12 +24,20 @@ pub const MAX_TEXTURES: usize = 4;
 /// The shader a material uses. Its kind decides where the material can be
 /// used: `Mesh` for [`MeshDraw`](crate::static_mesh::MeshDraw), `Skinned`
 /// for [`SkinnedDraw`](crate::skinned_mesh::SkinnedDraw), `Sky` for
-/// [`RenderWorld::sky`](crate::RenderWorld::sky).
+/// [`RenderWorld::sky`](crate::RenderWorld::sky), `Text` for
+/// [`TextDraw`](crate::text::TextDraw).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MaterialShader {
     Mesh(MeshShaderId),
     Skinned(SkinnedShaderId),
     Sky(SkyShaderId),
+    Text(TextShaderId),
+}
+
+impl From<TextShaderId> for MaterialShader {
+    fn from(id: TextShaderId) -> Self {
+        Self::Text(id)
+    }
 }
 
 impl From<SkyShaderId> for MaterialShader {

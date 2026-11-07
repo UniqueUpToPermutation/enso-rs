@@ -1,5 +1,5 @@
 use crate::{
-    ids::{MaterialId, MeshShaderId, SkinnedShaderId, SkyShaderId, TextureId},
+    ids::{MaterialId, MeshShaderId, SkinnedShaderId, SkyShaderId, TextShaderId, TextureId},
     params::ParamKind,
 };
 
@@ -20,6 +20,12 @@ pub enum RenderError {
 
     #[error("unknown sky shader {0:?} (never created, or destroyed)")]
     UnknownSkyShader(SkyShaderId),
+
+    #[error("unknown text shader {0:?} (never created, or destroyed)")]
+    UnknownTextShader(TextShaderId),
+
+    #[error("invalid font: {0}")]
+    InvalidFont(String),
 
     #[error("a material takes at most {max} textures, got {got}")]
     TooManyTextures { max: usize, got: usize },

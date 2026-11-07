@@ -6,12 +6,13 @@ use bytemuck::Zeroable as _;
 use wgpu::util::DeviceExt;
 
 use crate::{
-    Gpu, MaterialId, MeshId, MeshShaderId, ParamInfo, RenderError, RenderWorld, Renderer, ShaderDesc, SkeletonId,
-    SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextureId,
+    FontId, Gpu, MaterialId, MeshId, MeshShaderId, ParamInfo, RenderError, RenderWorld, Renderer, ShaderDesc,
+    SkeletonId, SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextShaderId, TextureId,
     material::{MaterialDesc, MaterialShader, MaterialStore},
     skinned_mesh::{SkeletonDesc, SkinnedMeshData, SkinnedMeshRenderer},
     sky::{SkyRenderer, SkyShaderDesc},
     static_mesh::{MeshData, StaticMeshRenderer},
+    text::{FontDesc, TextRenderer},
     subrenderer::{DrawData, FrameData, RenderContext, SubRenderer},
     texture::{Texture, TextureDesc},
 };
@@ -60,6 +61,7 @@ pub struct WgpuRenderer {
     sky: SkyRenderer,
     static_mesh: StaticMeshRenderer,
     skinned_mesh: SkinnedMeshRenderer,
+    text: TextRenderer,
 }
 
 struct DepthTarget {
@@ -115,6 +117,7 @@ impl WgpuRenderer {
             sky: SkyRenderer::new(&ctx),
             static_mesh: StaticMeshRenderer::new(&ctx),
             skinned_mesh: SkinnedMeshRenderer::new(&ctx),
+            text: TextRenderer::new(&ctx),
             ctx,
             globals_buffer,
             globals_bind_group,
@@ -247,6 +250,7 @@ impl Renderer for WgpuRenderer {
                 self.skinned_mesh.material_layout(id).ok_or(RenderError::UnknownSkinnedShader(id))?
             }
             MaterialShader::Sky(id) => self.sky.material_layout(id).ok_or(RenderError::UnknownSkyShader(id))?,
+            MaterialShader::Text(id) => self.text.material_layout(id).ok_or(RenderError::UnknownTextShader(id))?,
         };
         self.materials.create(desc, &self.textures, layout)
     }
@@ -266,6 +270,7 @@ impl Renderer for WgpuRenderer {
             MaterialShader::Mesh(id) => self.static_mesh.instance_layout(id)?,
             MaterialShader::Skinned(id) => self.skinned_mesh.instance_layout(id)?,
             MaterialShader::Sky(_) => return Some(&[]), // the sky has no instances
+            MaterialShader::Text(id) => self.text.instance_layout(id)?,
         };
         Some(layout.infos())
     }
@@ -284,6 +289,30 @@ impl Renderer for WgpuRenderer {
 
     fn destroy_sky_shader(&mut self, id: SkyShaderId) {
         self.sky.destroy_shader(id);
+    }
+
+    // ---- text ----
+
+    fn create_font(&mut self, desc: &FontDesc<'_>) -> Result<FontId, RenderError> {
+        self.text.create_font(desc)
+    }
+
+    fn destroy_font(&mut self, id: FontId) {
+        self.text.destroy_font(id);
+    }
+
+    fn create_text_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<TextShaderId, RenderError> {
+        self.text.create_shader(desc)
+    }
+
+    fn update_text_shader(&mut self, id: TextShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
+        let layout = self.text.update_shader(id, desc)?;
+        self.materials.relayout(MaterialShader::Text(id), layout);
+        Ok(())
+    }
+
+    fn destroy_text_shader(&mut self, id: TextShaderId) {
+        self.text.destroy_shader(id);
     }
 
     // ---- the frame ----
@@ -321,8 +350,8 @@ impl Renderer for WgpuRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enso frame") });
 
         // Add new subrenderers to both arrays, in draw order.
-        let subrenderers: [&mut dyn SubRenderer; 3] =
-            [&mut self.sky, &mut self.static_mesh, &mut self.skinned_mesh];
+        let subrenderers: [&mut dyn SubRenderer; 4] =
+            [&mut self.sky, &mut self.static_mesh, &mut self.skinned_mesh, &mut self.text];
         for sub in subrenderers {
             sub.prepare(&frame, &mut encoder);
         }
@@ -365,7 +394,8 @@ impl Renderer for WgpuRenderer {
             });
 
             let data = DrawData { globals: &self.globals_bind_group, materials: &self.materials };
-            let subrenderers: [&dyn SubRenderer; 3] = [&self.sky, &self.static_mesh, &self.skinned_mesh];
+            // Text last: it is blended, so it should land on top of the scene.
+            let subrenderers: [&dyn SubRenderer; 4] = [&self.sky, &self.static_mesh, &self.skinned_mesh, &self.text];
             for sub in subrenderers {
                 sub.draw(&mut pass, &data);
             }

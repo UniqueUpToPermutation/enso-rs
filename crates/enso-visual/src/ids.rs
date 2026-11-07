@@ -65,6 +65,16 @@ define_id!(
     SkeletonId
 );
 define_id!(
+    /// A font with its MSDF atlas, from
+    /// [`Renderer::create_font`](crate::Renderer::create_font).
+    FontId
+);
+define_id!(
+    /// A text shader, from
+    /// [`Renderer::create_text_shader`](crate::Renderer::create_text_shader).
+    TextShaderId
+);
+define_id!(
     /// A material (shader + textures + knobs), from
     /// [`Renderer::create_material`](crate::Renderer::create_material).
     MaterialId
