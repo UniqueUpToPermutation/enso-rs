@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "defaultMode": "auto",
+    "allow": [
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(git:*)",
+      "Bash(cargo:*)",
+      "PowerShell(git:*)",
+      "PowerShell(cargo:*)",
+      "Read(*)",
+      "Edit(*)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(sudo *)"
+    ]
+  }
+}

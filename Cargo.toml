@@ -1,0 +1,34 @@
+# Workspace manifest. This file has no code of its own; it groups the crates
+# under `crates/` so they share one Cargo.lock, one target/ dir, and one set
+# of dependency versions.
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# Metadata that member crates inherit with `edition.workspace = true`, etc.
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+# Every external dependency is versioned once, here. Member crates opt in with
+# `wgpu.workspace = true`. Keep wgpu/winit aligned with what egui-wgpu expects.
+[workspace.dependencies]
+enso-visual = { path = "crates/enso-visual" }
+
+wgpu = "30.0"
+winit = "0.30"
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "1.0"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+
+# Optimise dependencies even in debug builds: wgpu, naga and (later) the DSP
+# code are painfully slow unoptimised, while our own crates stay fast to build.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+debug = true # keep symbols so release builds can be profiled
