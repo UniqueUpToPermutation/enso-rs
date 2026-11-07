@@ -41,6 +41,10 @@ cargo doc -p enso-visual --no-deps --open           # browse the public API
 - **Nothing on the live path may panic on user input.** Shader compile
   errors return `RenderError`; missing resources are skipped silently.
 - **The audio thread (future) must never allocate, lock, or block.**
+- **Never work directly on `master`.** Before changing any file, create a
+  branch for the task (`git switch -c <type>/<short-topic>`, e.g.
+  `feat/particle-subrenderer`). Don't merge, rebase onto, or push `master`
+  yourself; the owner merges. See [workflow.md](docs/agents/workflow.md#git).
 
 ## Wiki (read the relevant page before working in that area)
 

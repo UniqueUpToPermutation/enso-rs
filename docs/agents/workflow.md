@@ -49,7 +49,23 @@ available.
 
 ## Git
 
-- Single branch `master` so far. Commit only when asked.
+### Branches
+
+`master` is the owner's branch. Agents work on their own branches:
+
+1. At the start of a task, check `git status` and `git branch --show-current`.
+   - On `master` with a clean tree: `git switch -c <type>/<short-topic>`.
+   - Already on a task branch the owner pointed you to: continue there.
+   - Uncommitted changes you didn't make: stop and ask before touching them.
+2. One branch per task. Branch names: `<type>/<short-topic>` in kebab-case.
+   Types: `feat` (new capability), `fix` (bug), `refactor`, `docs`, `chore`
+   (tooling, deps, config), `experiment` (throwaway exploration).
+3. Commit only when asked (or when the owner has said to commit as you go).
+4. When done, report the branch name and what's on it. **Don't** merge into
+   `master`, rebase, force-push, push to a remote or delete branches unless
+   the owner asks for that specific action.
+
+### Other conventions
 - `Cargo.lock` is committed (application workspace).
 - `.claude/settings.json` (shared permissions) is committed; personal
   overrides go in `.claude/settings.local.json`.

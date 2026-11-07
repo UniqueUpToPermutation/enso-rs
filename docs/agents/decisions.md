@@ -35,6 +35,10 @@ at a fixed tick; rendering interpolates. Consequences:
 - Camera, time, clear colour and material params live in `RenderWorld`.
 - Rendering lags the simulation by up to one tick, so run the sim fast (120-240 Hz).
 
+**2026-11-07: Agents work on branches, never on `master`.** (Owner's
+request.) Each task gets a `<type>/<short-topic>` branch; the owner reviews
+and merges.
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.
