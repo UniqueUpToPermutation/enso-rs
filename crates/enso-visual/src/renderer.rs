@@ -1,11 +1,13 @@
+//! [`WgpuRenderer`]: the wgpu implementation of [`Renderer`](crate::Renderer).
+
 use std::collections::HashMap;
 
 use bytemuck::Zeroable as _;
 use wgpu::util::DeviceExt;
 
 use crate::{
-    Gpu, MaterialId, MeshId, MeshShaderId, RenderError, RenderWorld, ShaderDesc, SkeletonId, SkinnedMeshId,
-    SkinnedShaderId, SkyShaderId, TextureId,
+    Gpu, MaterialId, MeshId, MeshShaderId, RenderError, RenderWorld, Renderer, ShaderDesc, SkeletonId,
+    SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextureId,
     material::{MaterialDesc, MaterialShader, MaterialStore},
     skinned_mesh::{SkeletonDesc, SkinnedMeshData, SkinnedMeshRenderer},
     sky::{SkyRenderer, SkyShaderDesc},
@@ -14,7 +16,8 @@ use crate::{
     texture::{Texture, TextureDesc},
 };
 
-/// Where to render: usually the window's current surface texture.
+/// Where a [`WgpuRenderer`] draws: usually the window's current surface
+/// texture, or an [`OffscreenTarget`](crate::OffscreenTarget).
 #[derive(Debug, Clone, Copy)]
 pub struct RenderTarget<'a> {
     pub view: &'a wgpu::TextureView,
@@ -37,16 +40,13 @@ struct GlobalsUniform {
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// The renderer.
-///
-/// * **Resources** (textures, meshes, shaders, materials) are created up
-///   front and referred to by ID.
-/// * **Each frame**, [`render`](Self::render) is given the previous and
-///   current [`RenderWorld`] and an interpolation factor.
+/// The wgpu implementation of [`Renderer`].
 ///
 /// Internally the work is split across subrenderers, one per kind of
-/// drawable; they are not exposed.
-pub struct Renderer {
+/// drawable (sky, static meshes, skinned meshes); they are not exposed.
+///
+/// The trait's methods need it in scope: `use enso_visual::Renderer;`.
+pub struct WgpuRenderer {
     ctx: RenderContext,
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
@@ -67,7 +67,8 @@ struct DepthTarget {
     view: wgpu::TextureView,
 }
 
-impl Renderer {
+/// What only the wgpu implementation has: construction and GPU access.
+impl WgpuRenderer {
     /// `color_format` must match the surface (or texture) you will render to.
     pub fn new(gpu: Gpu, color_format: wgpu::TextureFormat) -> Self {
         let device = &gpu.device;
@@ -132,94 +133,110 @@ impl Renderer {
         self.ctx.color_format
     }
 
-    // ---- textures -----------------------------------------------------------
+    /// The shared depth buffer, (re)created whenever the target size changes.
+    fn depth_view(&mut self, width: u32, height: u32) -> &wgpu::TextureView {
+        let size = (width.max(1), height.max(1));
+        if self.depth.as_ref().is_none_or(|d| d.size != size) {
+            let texture = self.ctx.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("enso depth"),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: DEPTH_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            self.depth = Some(DepthTarget { size, view });
+        }
+        &self.depth.as_ref().unwrap().view
+    }
+}
 
-    pub fn create_texture(&mut self, desc: &TextureDesc<'_>) -> Result<TextureId, RenderError> {
+/// The interface. Documentation lives on the trait (`lib.rs`).
+impl Renderer for WgpuRenderer {
+    type Target<'a> = RenderTarget<'a>;
+
+    // ---- textures ----
+
+    fn create_texture(&mut self, desc: &TextureDesc<'_>) -> Result<TextureId, RenderError> {
         let texture = Texture::new(&self.ctx.gpu.device, &self.ctx.gpu.queue, desc)?;
         let id = TextureId::next();
         self.textures.insert(id, texture);
         Ok(id)
     }
 
-    /// Replace a texture's pixels. Cheap enough to call every frame.
-    pub fn write_texture(&self, id: TextureId, data: &[u8]) -> Result<(), RenderError> {
+    fn write_texture(&mut self, id: TextureId, data: &[u8]) -> Result<(), RenderError> {
         self.textures
             .get(&id)
             .ok_or(RenderError::UnknownTexture(id))?
             .write(&self.ctx.gpu.queue, data)
     }
 
-    /// Materials already using this texture keep it alive on the GPU.
-    pub fn destroy_texture(&mut self, id: TextureId) {
+    fn destroy_texture(&mut self, id: TextureId) {
         self.textures.remove(&id);
     }
 
-    // ---- static meshes -------------------------------------------------------
+    // ---- static meshes ----
 
-    pub fn create_mesh(&mut self, data: &MeshData) -> MeshId {
+    fn create_mesh(&mut self, data: &MeshData) -> MeshId {
         self.static_mesh.create_mesh(data)
     }
 
-    pub fn destroy_mesh(&mut self, id: MeshId) {
+    fn destroy_mesh(&mut self, id: MeshId) {
         self.static_mesh.destroy_mesh(id);
     }
 
-    /// Compile a shader against the static mesh contract
-    /// ([`static_mesh::PRELUDE`](crate::static_mesh::PRELUDE)).
-    pub fn create_mesh_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<MeshShaderId, RenderError> {
+    fn create_mesh_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<MeshShaderId, RenderError> {
         self.static_mesh.create_shader(desc)
     }
 
-    /// Recompile a shader in place, keeping its ID, so every material using
-    /// it switches over. On error the previous version keeps running.
-    pub fn update_mesh_shader(&mut self, id: MeshShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
+    fn update_mesh_shader(&mut self, id: MeshShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
         self.static_mesh.update_shader(id, desc)
     }
 
-    pub fn destroy_mesh_shader(&mut self, id: MeshShaderId) {
+    fn destroy_mesh_shader(&mut self, id: MeshShaderId) {
         self.static_mesh.destroy_shader(id);
     }
 
-    // ---- skinned meshes ---------------------------------------------------------
+    // ---- skinned meshes ----
 
-    pub fn create_skinned_mesh(&mut self, data: &SkinnedMeshData) -> SkinnedMeshId {
+    fn create_skinned_mesh(&mut self, data: &SkinnedMeshData) -> SkinnedMeshId {
         self.skinned_mesh.create_mesh(data)
     }
 
-    pub fn destroy_skinned_mesh(&mut self, id: SkinnedMeshId) {
+    fn destroy_skinned_mesh(&mut self, id: SkinnedMeshId) {
         self.skinned_mesh.destroy_mesh(id);
     }
 
-    /// Validate a joint hierarchy and precompute its inverse bind matrices.
-    pub fn create_skeleton(&mut self, desc: &SkeletonDesc) -> Result<SkeletonId, RenderError> {
+    fn create_skeleton(&mut self, desc: &SkeletonDesc) -> Result<SkeletonId, RenderError> {
         self.skinned_mesh.create_skeleton(desc)
     }
 
-    pub fn destroy_skeleton(&mut self, id: SkeletonId) {
+    fn destroy_skeleton(&mut self, id: SkeletonId) {
         self.skinned_mesh.destroy_skeleton(id);
     }
 
-    /// Compile a shader against the skinned mesh contract
-    /// ([`skinned_mesh::PRELUDE`](crate::skinned_mesh::PRELUDE)).
-    pub fn create_skinned_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<SkinnedShaderId, RenderError> {
+    fn create_skinned_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<SkinnedShaderId, RenderError> {
         self.skinned_mesh.create_shader(desc)
     }
 
-    /// Recompile a skinned shader in place, keeping its ID. On error the
-    /// previous version keeps running.
-    pub fn update_skinned_shader(&mut self, id: SkinnedShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
+    fn update_skinned_shader(&mut self, id: SkinnedShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
         self.skinned_mesh.update_shader(id, desc)
     }
 
-    pub fn destroy_skinned_shader(&mut self, id: SkinnedShaderId) {
+    fn destroy_skinned_shader(&mut self, id: SkinnedShaderId) {
         self.skinned_mesh.destroy_shader(id);
     }
 
-    // ---- materials ----------------------------------------------------------------
+    // ---- materials ----
 
-    /// A material for static meshes (shader is a [`MeshShaderId`]) or skinned
-    /// meshes (shader is a [`SkinnedShaderId`]).
-    pub fn create_material(&mut self, desc: &MaterialDesc<'_>) -> Result<MaterialId, RenderError> {
+    fn create_material(&mut self, desc: &MaterialDesc<'_>) -> Result<MaterialId, RenderError> {
         match desc.shader {
             MaterialShader::Mesh(id) if !self.static_mesh.has_shader(id) => Err(RenderError::UnknownShader(id)),
             MaterialShader::Skinned(id) if !self.skinned_mesh.has_shader(id) => {
@@ -229,37 +246,27 @@ impl Renderer {
         }
     }
 
-    pub fn destroy_material(&mut self, id: MaterialId) {
+    fn destroy_material(&mut self, id: MaterialId) {
         self.materials.destroy(id);
     }
 
-    // ---- sky --------------------------------------------------------------------
+    // ---- sky ----
 
-    /// Compile a sky shader against the sky contract
-    /// ([`sky::PRELUDE`](crate::sky::PRELUDE)): you write `fs_main` only.
-    pub fn create_sky_shader(&mut self, desc: &SkyShaderDesc<'_>) -> Result<SkyShaderId, RenderError> {
+    fn create_sky_shader(&mut self, desc: &SkyShaderDesc<'_>) -> Result<SkyShaderId, RenderError> {
         self.sky.create_shader(desc)
     }
 
-    /// Recompile a sky shader in place, keeping its ID. On error the
-    /// previous version keeps running.
-    pub fn update_sky_shader(&mut self, id: SkyShaderId, desc: &SkyShaderDesc<'_>) -> Result<(), RenderError> {
+    fn update_sky_shader(&mut self, id: SkyShaderId, desc: &SkyShaderDesc<'_>) -> Result<(), RenderError> {
         self.sky.update_shader(id, desc)
     }
 
-    pub fn destroy_sky_shader(&mut self, id: SkyShaderId) {
+    fn destroy_sky_shader(&mut self, id: SkyShaderId) {
         self.sky.destroy_shader(id);
     }
 
-    // ---- the frame ------------------------------------------------------------
+    // ---- the frame ----
 
-    /// Render the moment `alpha` of the way from `prev` to `curr`.
-    ///
-    /// `alpha = 0` renders `prev`, `alpha = 1` renders `curr`. With a
-    /// fixed-rate simulation, `alpha` is how far the wall clock has moved
-    /// into the next (not yet simulated) tick. To render a single world
-    /// without interpolation, pass it as both `prev` and `curr`.
-    pub fn render(&mut self, target: RenderTarget<'_>, prev: &RenderWorld, curr: &RenderWorld, alpha: f32) {
+    fn render(&mut self, target: RenderTarget<'_>, prev: &RenderWorld, curr: &RenderWorld, alpha: f32) {
         let alpha = alpha.clamp(0.0, 1.0);
         // Needs `&mut self`, so do it before borrowing fields below.
         let depth_view = self.depth_view(target.width, target.height).clone();
@@ -331,29 +338,5 @@ impl Renderer {
         }
 
         gpu.queue.submit([encoder.finish()]);
-    }
-
-    /// The shared depth buffer, (re)created whenever the target size changes.
-    fn depth_view(&mut self, width: u32, height: u32) -> &wgpu::TextureView {
-        let size = (width.max(1), height.max(1));
-        if self.depth.as_ref().is_none_or(|d| d.size != size) {
-            let texture = self.ctx.gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("enso depth"),
-                size: wgpu::Extent3d {
-                    width: size.0,
-                    height: size.1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: DEPTH_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&Default::default());
-            self.depth = Some(DepthTarget { size, view });
-        }
-        &self.depth.as_ref().unwrap().view
     }
 }

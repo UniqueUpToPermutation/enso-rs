@@ -50,5 +50,5 @@ reload is via `notify`. Feature flags gate formats (`image` with
 
 The application owns winit and the `wgpu::Surface` (configure, acquire,
 present). Expected: an output window (projector) plus a control window
-(egui), sharing one `Renderer`. A winit-free `WindowSurface` helper in
+(egui), sharing one `WgpuRenderer`. A winit-free `WindowSurface` helper in
 `enso-visual` was proposed but not built.

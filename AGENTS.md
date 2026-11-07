@@ -34,6 +34,9 @@ cargo doc -p enso-visual --no-deps --open           # browse the public API
   `[workspace.dependencies]`.** Member crates use `dep.workspace = true`.
 - **`enso-visual` must not depend on winit** (dev-dependency for examples
   only). Windows and event loops belong to the application.
+- **`Renderer` is a trait** (`lib.rs`) implemented by `WgpuRenderer`. New
+  renderer methods go on the trait first (with docs), then the impl, then
+  the fake in `tests/renderer_trait.rs`.
 - **Subrenderers are private.** Users interact through `Renderer` (resource
   creation, `render`) and plain-data `RenderWorld`s. Don't re-expose them.
 - **`RenderWorld` must stay plain data:** IDs, numbers, glam types. No wgpu

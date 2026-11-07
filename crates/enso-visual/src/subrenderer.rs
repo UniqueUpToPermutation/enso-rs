@@ -13,7 +13,8 @@
 //!   and draw it.
 //!
 //! Subrenderers are private to this crate. Users only see the
-//! [`Renderer`](crate::Renderer) facade and the data types that go into a
+//! [`Renderer`](crate::Renderer) trait (implemented by
+//! [`WgpuRenderer`](crate::WgpuRenderer)) and the data types that go into a
 //! `RenderWorld`.
 
 use crate::{Gpu, RenderWorld, material::MaterialStore};

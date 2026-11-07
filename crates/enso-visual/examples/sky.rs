@@ -10,7 +10,7 @@ mod common;
 
 use common::{Example, Setup, hue};
 use enso_visual::{
-    BlendMode, Camera, MaterialDesc, MaterialId, MeshId, RenderWorld, SkyShaderId, Transform,
+    BlendMode, Camera, MaterialDesc, MaterialId, MeshId, RenderWorld, Renderer, SkyShaderId, Transform,
     glam::{Quat, Vec3, Vec4},
     sky::Sky,
     static_mesh::{MeshData, MeshDraw},

@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, time::Instant};
 
-use enso_visual::{Gpu, RenderTarget, Renderer, wgpu};
+use enso_visual::{Gpu, RenderTarget, Renderer, WgpuRenderer, wgpu};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, WindowEvent},
@@ -32,7 +32,7 @@ struct State<E> {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
-    renderer: Renderer,
+    renderer: WgpuRenderer,
     shaders: ShaderWatcher,
     sim: Simulation<E>,
     accumulator: f64,
@@ -95,7 +95,7 @@ impl<E: Example> State<E> {
         }
         surface.configure(&gpu.device, &config);
 
-        let mut renderer = Renderer::new(gpu, config.format);
+        let mut renderer = WgpuRenderer::new(gpu, config.format);
         let mut shaders = ShaderWatcher::default();
         let example = E::init(&mut Setup { renderer: &mut renderer, shaders: &mut shaders });
 

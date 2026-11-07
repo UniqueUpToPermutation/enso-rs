@@ -21,7 +21,10 @@ macro_rules! define_id {
         pub struct $name(u64);
 
         impl $name {
-            pub(crate) fn next() -> Self {
+            /// A fresh ID, never returned before (across all ID types).
+            /// [`Renderer`](crate::Renderer) implementations use this to
+            /// name the resources they create.
+            pub fn next() -> Self {
                 Self(next_raw())
             }
         }

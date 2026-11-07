@@ -9,7 +9,7 @@ use crate::{Gpu, RenderError, RenderTarget};
 ///
 /// ```ignore
 /// let offscreen = OffscreenTarget::new(&gpu, 640, 360, wgpu::TextureFormat::Rgba8UnormSrgb);
-/// let mut renderer = Renderer::new(gpu.clone(), offscreen.format());
+/// let mut renderer = WgpuRenderer::new(gpu.clone(), offscreen.format());
 /// renderer.render(offscreen.target(), &prev, &curr, alpha);
 /// let rgba = offscreen.read_pixels(&gpu)?;
 /// ```

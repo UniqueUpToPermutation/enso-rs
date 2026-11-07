@@ -23,7 +23,7 @@ use std::{
 };
 
 use enso_visual::{
-    BlendMode, MeshShaderId, RenderError, RenderWorld, Renderer, ShaderDesc, SkinnedShaderId, SkyShaderId,
+    BlendMode, MeshShaderId, RenderError, RenderWorld, Renderer, ShaderDesc, SkinnedShaderId, SkyShaderId, WgpuRenderer,
     glam::Vec4,
     sky::SkyShaderDesc,
 };
@@ -57,7 +57,7 @@ pub trait Example: 'static {
 
 /// Handed to [`Example::init`].
 pub struct Setup<'a> {
-    pub renderer: &'a mut Renderer,
+    pub renderer: &'a mut WgpuRenderer,
     shaders: &'a mut ShaderWatcher,
 }
 
@@ -155,7 +155,8 @@ enum ShaderKind {
 }
 
 impl ShaderKind {
-    fn update(&self, renderer: &mut Renderer, label: &str, source: &str) -> Result<(), RenderError> {
+    /// Written against the `Renderer` trait: it works with any implementation.
+    fn update(&self, renderer: &mut impl Renderer, label: &str, source: &str) -> Result<(), RenderError> {
         match *self {
             Self::Mesh { id, blend } => renderer.update_mesh_shader(id, &ShaderDesc::new(label, source).blend(blend)),
             Self::Skinned { id, blend } => {
@@ -183,7 +184,7 @@ impl ShaderWatcher {
     }
 
     /// Check (at most 4 times a second) for edited shader files.
-    fn reload_changed(&mut self, renderer: &mut Renderer) {
+    fn reload_changed(&mut self, renderer: &mut impl Renderer) {
         if self.last_check.is_some_and(|t| t.elapsed() < Duration::from_millis(250)) {
             return;
         }

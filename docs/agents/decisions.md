@@ -71,6 +71,16 @@ group-1 material layout, so one `MaterialStore` serves both;
 belongs to. These types moved from `static_mesh::` to the crate root, a
 breaking path change for users. Existing goldens were verified unchanged.
 
+**2026-11-07: `Renderer` is a trait; `WgpuRenderer` implements it.**
+(Owner's choice.) The interface and its docs live in `lib.rs`; the
+implementation lives in `renderer.rs`. `render` takes an associated
+`Target<'a>` type so the trait doesn't name wgpu types there. ID
+constructors (`XxxId::next()`) became public so other implementations can
+mint IDs. A GPU-free fake (`tests/renderer_trait.rs`) proves scene code
+can be written against `impl Renderer` and tested without a GPU. Next
+step when `enso-core` exists: move the trait, `RenderWorld`, IDs and
+descriptors there (needs an own texture-format enum first).
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.

@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use enso_visual::{Gpu, OffscreenTarget, Renderer, wgpu};
+use enso_visual::{Gpu, OffscreenTarget, Renderer, WgpuRenderer, wgpu};
 use image::{Rgba, RgbaImage};
 
 use super::{Example, Setup, ShaderWatcher, Simulation};
@@ -87,7 +87,7 @@ fn render_headless<E: Example>() -> RgbaImage {
     let gpu = Gpu::new_blocking(Gpu::create_instance(), None)
         .expect("golden-image tests need a GPU adapter, and none was found");
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-    let mut renderer = Renderer::new(gpu.clone(), format);
+    let mut renderer = WgpuRenderer::new(gpu.clone(), format);
 
     let mut shaders = ShaderWatcher::default();
     let example = E::init(&mut Setup { renderer: &mut renderer, shaders: &mut shaders });

@@ -11,7 +11,8 @@ mod common;
 
 use common::{Example, Setup, hue};
 use enso_visual::{
-    BlendMode, Camera, MaterialDesc, MaterialId, RenderWorld, SkeletonId, SkinnedMeshId, SkyShaderId, Transform,
+    BlendMode, Camera, MaterialDesc, MaterialId, RenderWorld, Renderer, SkeletonId, SkinnedMeshId, SkyShaderId,
+    Transform,
     glam::{Quat, Vec3, Vec4},
     skinned_mesh::{SkeletonDesc, SkinnedDraw, SkinnedMeshData},
     sky::Sky,

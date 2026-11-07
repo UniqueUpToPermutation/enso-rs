@@ -2,8 +2,19 @@
 
 ## Public API shape
 
+`Renderer` is a **trait** (in `lib.rs`); `WgpuRenderer` implements it.
+Callers need `use enso_visual::Renderer;` to call the methods. Code that
+only builds scenes should take `&mut impl Renderer`; it then runs against
+the GPU-free fake in `tests/renderer_trait.rs` too. The trait has an
+associated `Target<'a>` (`RenderTarget` for wgpu, `()` for the fake), so
+`render` doesn't name wgpu types. `TextureDesc::format` still does (a
+`wgpu::TextureFormat`); replace it with an own enum before moving the
+trait to `enso-core`.
+
 ```rust
-// Resources: created up front, referred to by Copy IDs (never reused)
+let mut renderer = WgpuRenderer::new(gpu, surface_format);   // inherent: new, gpu, color_format
+
+// Resources (trait methods): created up front, referred to by Copy IDs (never reused)
 renderer.create_texture(&TextureDesc) -> Result<TextureId>
 renderer.create_mesh(&MeshData) -> MeshId
 renderer.create_mesh_shader(&ShaderDesc) -> Result<MeshShaderId>
@@ -36,8 +47,8 @@ Per-subrenderer contract types live in `static_mesh::`, `skinned_mesh::`, `sky::
 
 | File | Role |
 |---|---|
-| `src/lib.rs` | Module list + `pub use` re-exports = the public API |
-| `src/renderer.rs` | `Renderer` facade: globals, depth buffer, textures, materials, owns subrenderers, `render()` |
+| `src/lib.rs` | Module list + `pub use` re-exports + **`pub trait Renderer`** (the interface, with its docs) |
+| `src/renderer.rs` | `WgpuRenderer` (implements `Renderer`): globals, depth buffer, textures, materials, owns subrenderers, `render()`; inherent `new`/`gpu`/`color_format` |
 | `src/subrenderer.rs` | `pub(crate)` `SubRenderer` trait (`prepare`, `draw`), `RenderContext`, `FrameData`, `DrawData` |
 | `src/world.rs` | `RenderWorld` (incl. packed `poses` for skinned draws), `MaterialParams` |
 | `src/ids.rs` | `define_id!` macro: all resource ID types |
@@ -143,7 +154,7 @@ when opaque).
 Compile error line numbers refer to the *composed* source, offset by the
 globals + parts length. Mapping them back to the user file is a known TODO.
 
-## Frame flow (`Renderer::render`)
+## Frame flow (`WgpuRenderer::render`)
 
 1. Interpolate camera, time, clear colour; compute `delta_time` from the
    last rendered time; write the globals uniform.
@@ -205,9 +216,13 @@ globals + parts length. Mapping them back to the user file is a known TODO.
    Mesh-like? Reuse `MATERIAL_WGSL` + `ctx.material_layout` (group 1),
    `shader::mesh_pipeline`, and `InstanceBatches`, and add a variant to
    `MaterialShader` (plus a check in `Renderer::create_material`).
-3. Add a field to `Renderer`, construct it in `Renderer::new`, and add it to
-   **both** subrenderer arrays in `render()` (prepare and draw), in draw order.
+3. Add a field to `WgpuRenderer`, construct it in `WgpuRenderer::new`, and
+   add it to **both** subrenderer arrays in `render()` (prepare and draw),
+   in draw order.
 4. Add its section to `RenderWorld` (plain data, cleared in `clear()` if it
-   is per-tick) and its `create_*`/`update_*`/`destroy_*` methods to `Renderer`.
+   is per-tick). Declare its `create_*`/`update_*`/`destroy_*` methods (with
+   docs) on the `Renderer` trait in `lib.rs`, implement them in
+   `impl Renderer for WgpuRenderer`, and add stubs to the fake in
+   `tests/renderer_trait.rs`.
 5. Add ID types in `ids.rs` and error variants in `error.rs` as needed.
 6. Add an example (with golden test) that exercises it.
