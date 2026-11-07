@@ -198,7 +198,11 @@ globals + parts length. Mapping them back to the user file is a known TODO.
      inverse bind), append to one frame-wide `Vec<Mat4>`, and store its
      start index as the instance's `joint_offset`. Upload to the storage
      buffer (grows to the next power of two; bind group rebuilt).
-4. One render pass (clear colour + depth); `draw()` on each subrenderer in
+4. Colour load op: if `SkyRenderer::covers_target()` (a valid sky is set
+   and its shader source has no `discard`), `LoadOp::DontCare` (unsafe
+   token; sound because the sky REPLACE-writes every pixel first);
+   otherwise `Clear(clear_color)`. Depth is always cleared to 1.0.
+   One render pass; `draw()` on each subrenderer in
    order: **sky first** (depth `Always`, no depth write), then static,
    then skinned meshes. Drawing the sky last at depth 1.0 would save
    overdraw but would paint over blended meshes (they don't write depth).

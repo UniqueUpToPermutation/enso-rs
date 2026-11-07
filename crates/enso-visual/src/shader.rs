@@ -100,6 +100,30 @@ pub(crate) fn compose_with_structs(parts: &[&str], user_source: &str, structs: &
     out
 }
 
+/// Whether `source` uses the identifier `word` outside `//` comments.
+/// Errs towards `true` (e.g. inside `/* */` comments), so it is safe for
+/// "is this feature *not* used?" checks.
+pub(crate) fn mentions(source: &str, word: &str) -> bool {
+    source.lines().any(|line| {
+        let code = line.split("//").next().unwrap_or("");
+        code.split(|c: char| !(c.is_alphanumeric() || c == '_')).any(|w| w == word)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mentions;
+
+    #[test]
+    fn mentions_finds_words_outside_line_comments() {
+        assert!(mentions("if x < 0.0 { discard; }", "discard"));
+        assert!(!mentions("let y = 1.0; // we never discard", "discard"));
+        assert!(!mentions("let discarded = 1.0;", "discard"));
+        // Inside block comments it errs towards "yes", the safe answer.
+        assert!(mentions("/* discard */", "discard"));
+    }
+}
+
 /// Read the parameter struct bound at `@group(group) @binding(0)` from a
 /// composed shader source.
 pub(crate) fn reflect_params(label: &str, source: &str, group: u32) -> Result<ParamLayout, RenderError> {

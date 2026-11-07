@@ -102,6 +102,13 @@ in the fragment shader), replacing the per-pixel `sky_view_dir()`. This
 replaced `Sky`/`SkyParams`/`with_params`. The sky and tentacles goldens were
 unchanged within tolerance.
 
+**2026-11-07: Skip the colour clear when the sky covers the screen.**
+(Owner's request.) Uses `LoadOp::DontCare`, which wgpu documents as the
+fastest load op when every pixel is overwritten. It's sound only because the
+sky draws first with REPLACE over a fullscreen triangle. A sky shader whose
+source mentions `discard` falls back to `Clear`, so pixels are never left
+undefined. Keep this invariant if the sky's draw order or blending changes.
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.

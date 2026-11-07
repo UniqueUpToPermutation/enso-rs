@@ -327,6 +327,18 @@ impl Renderer for WgpuRenderer {
             sub.prepare(&frame, &mut encoder);
         }
 
+        // When the sky covers the screen, its pixels replace whatever was
+        // there, so clearing first would be wasted work: tell the GPU the old
+        // contents don't matter (the fastest load op on every GPU).
+        let color_load = if self.sky.covers_target() {
+            // SAFETY: the sky draws first, as a fullscreen triangle with
+            // REPLACE blending, from a shader without `discard`, so every
+            // pixel is written before anything reads, blends with or stores it.
+            wgpu::LoadOp::DontCare(unsafe { wgpu::LoadOpDontCare::enabled() })
+        } else {
+            wgpu::LoadOp::Clear(wgpu::Color { r: clear.x, g: clear.y, b: clear.z, a: clear.w })
+        };
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("enso main pass"),
@@ -335,7 +347,7 @@ impl Renderer for WgpuRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: clear.x, g: clear.y, b: clear.z, a: clear.w }),
+                        load: color_load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],

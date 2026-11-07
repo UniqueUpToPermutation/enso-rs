@@ -11,7 +11,10 @@
 // and sample `texture0`.. (e.g. a panorama).
 //
 // The sky is drawn before everything else, without depth, so anything drawn
-// after it appears in front.
+// after it appears in front. Because it covers every pixel, the renderer
+// skips clearing the screen first, unless your shader uses `discard`, in
+// which case it clears to `RenderWorld::clear_color` so no pixel is left
+// undefined. Prefer writing every pixel.
 
 struct SkyIn {
     @builtin(position) position: vec4<f32>,  // fragment: pixel coordinates

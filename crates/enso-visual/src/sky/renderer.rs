@@ -15,6 +15,8 @@ struct ShaderEntry {
     pipeline: wgpu::RenderPipeline,
     /// Its `struct Material`.
     material_layout: Arc<ParamLayout>,
+    /// Whether the fragment shader may `discard`, leaving pixels unwritten.
+    discards: bool,
 }
 
 pub(crate) struct SkyRenderer {
@@ -119,7 +121,15 @@ impl SkyRenderer {
         Ok(ShaderEntry {
             pipeline,
             material_layout: Arc::new(shader::reflect_params(desc.label, &source, 1)?),
+            discards: shader::mentions(desc.source, "discard"),
         })
+    }
+
+    /// Whether this frame's sky writes every pixel of the target: it draws
+    /// (a valid sky material is set) and its shader never `discard`s. Valid
+    /// after `prepare`. When true, the target needn't be cleared.
+    pub(crate) fn covers_target(&self) -> bool {
+        self.current.is_some_and(|(shader_id, _)| !self.shaders[&shader_id].discards)
     }
 }
 

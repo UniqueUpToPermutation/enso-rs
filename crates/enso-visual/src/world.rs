@@ -51,8 +51,8 @@ pub struct RenderWorld {
     /// `globals.time`.
     pub time: f64,
     pub camera: Camera,
-    /// Linear RGBA. Visible wherever nothing is drawn (i.e. when there is
-    /// no sky).
+    /// Linear RGBA, visible wherever nothing is drawn. Unused while a sky
+    /// covers the screen (the clear is skipped then).
     pub clear_color: Vec4,
     /// A material whose shader is a sky shader
     /// ([`SkyShaderId`](crate::SkyShaderId)), drawn first, behind everything.
