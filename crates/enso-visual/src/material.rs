@@ -1,19 +1,18 @@
-//! Materials: a shader plus its inputs (four `vec4` knobs and up to four
-//! textures), shared by the mesh-like subrenderers.
+//! Materials: a shader plus its inputs (its `struct Material` values and up
+//! to four textures), shared by the static mesh, skinned mesh and sky
+//! subrenderers.
 //!
 //! All materials use the same bind group layout (`@group(1)`, declared in
-//! `material.wgsl`), so one store serves every subrenderer. Which
-//! subrenderer can use a material follows from its shader's kind.
+//! `material.wgsl`), so one store serves every subrenderer. The *size* of
+//! each material's uniform buffer follows its shader's `struct Material`,
+//! whose layout the subrenderer reflects when compiling the shader.
 
-use std::collections::HashMap;
-
-use glam::Vec4;
-use wgpu::util::DeviceExt;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    Gpu, MaterialId, MeshShaderId, RenderError, RenderWorld, SkinnedShaderId, TextureId,
+    Gpu, MaterialId, MeshShaderId, RenderError, RenderWorld, SkinnedShaderId, SkyShaderId, TextureId,
+    params::{Param, ParamLayout, ParamName, ParamType, ParamValue},
     texture::{Texture, TextureDesc},
-    world::MaterialParams,
 };
 
 /// The material WGSL contract, included in every mesh-like shader.
@@ -22,13 +21,21 @@ pub(crate) const MATERIAL_WGSL: &str = include_str!("material.wgsl");
 /// Number of texture slots in a material (`texture0`..`texture3`).
 pub const MAX_TEXTURES: usize = 4;
 
-/// The shader a material uses. Its kind decides which draws can use the
-/// material: `Mesh` for [`MeshDraw`](crate::static_mesh::MeshDraw),
-/// `Skinned` for [`SkinnedDraw`](crate::skinned_mesh::SkinnedDraw).
+/// The shader a material uses. Its kind decides where the material can be
+/// used: `Mesh` for [`MeshDraw`](crate::static_mesh::MeshDraw), `Skinned`
+/// for [`SkinnedDraw`](crate::skinned_mesh::SkinnedDraw), `Sky` for
+/// [`RenderWorld::sky`](crate::RenderWorld::sky).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MaterialShader {
     Mesh(MeshShaderId),
     Skinned(SkinnedShaderId),
+    Sky(SkyShaderId),
+}
+
+impl From<SkyShaderId> for MaterialShader {
+    fn from(id: SkyShaderId) -> Self {
+        Self::Sky(id)
+    }
 }
 
 impl From<MeshShaderId> for MaterialShader {
@@ -49,21 +56,26 @@ pub struct MaterialDesc<'a> {
     pub shader: MaterialShader,
     /// Bound to `texture0`.. in order; missing slots are 1x1 white.
     pub textures: &'a [TextureId],
-    /// Used whenever a `RenderWorld` does not set this material's params.
-    pub params: MaterialParams,
+    /// Values for `struct Material` fields when a tick doesn't set them.
+    pub(crate) defaults: Vec<(String, ParamValue)>,
 }
 
 impl<'a> MaterialDesc<'a> {
-    /// `shader` is a [`MeshShaderId`] or a [`SkinnedShaderId`].
+    /// `shader` is a [`MeshShaderId`], [`SkinnedShaderId`] or [`SkyShaderId`].
     pub fn new(shader: impl Into<MaterialShader>) -> Self {
-        Self { shader: shader.into(), textures: &[], params: [Vec4::ZERO; 4] }
+        Self { shader: shader.into(), textures: &[], defaults: Vec::new() }
     }
+
     pub fn with_textures(mut self, textures: &'a [TextureId]) -> Self {
         self.textures = textures;
         self
     }
-    pub fn with_params(mut self, params: MaterialParams) -> Self {
-        self.params = params;
+
+    /// Default value of the shader's `struct Material` field `name`
+    /// (otherwise 0). Checked when the material is created.
+    pub fn with_param<T: ParamType>(mut self, name: &str, value: T) -> Self {
+        let (_, value) = Param::<T>::new(name).value(value);
+        self.defaults.push((name.to_owned(), value));
         self
     }
 }
@@ -73,10 +85,15 @@ impl<'a> MaterialDesc<'a> {
 pub(crate) struct MaterialEntry {
     pub shader: MaterialShader,
     pub bind_group: wgpu::BindGroup,
-    params_buffer: wgpu::Buffer,
-    default_params: MaterialParams,
-    /// What is currently in `params_buffer`, to skip redundant uploads.
-    uploaded_params: MaterialParams,
+    pub layout: Arc<ParamLayout>,
+    defaults: Vec<(ParamName, ParamValue)>,
+    default_bytes: Vec<u8>,
+    /// This frame's packed values (scratch).
+    bytes: Vec<u8>,
+    /// What is currently in `buffer`, to skip redundant uploads.
+    uploaded: Vec<u8>,
+    buffer: wgpu::Buffer,
+    views: [wgpu::TextureView; MAX_TEXTURES],
 }
 
 pub(crate) struct MaterialStore {
@@ -85,6 +102,11 @@ pub(crate) struct MaterialStore {
     sampler: wgpu::Sampler,
     white: Texture,
     entries: HashMap<MaterialId, MaterialEntry>,
+}
+
+/// Uniform buffers are sized in multiples of 16 bytes.
+fn uniform_size(layout: &ParamLayout) -> usize {
+    (layout.size as usize).next_multiple_of(16).max(16)
 }
 
 impl MaterialStore {
@@ -111,7 +133,7 @@ impl MaterialStore {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(size_of::<MaterialParams>() as u64),
+                        min_binding_size: None, // follows each shader's struct
                     },
                     count: None,
                 },
@@ -155,74 +177,131 @@ impl MaterialStore {
         self.entries.get(&id)
     }
 
-    /// The caller checks that `desc.shader` exists.
+    /// The caller checks that `desc.shader` exists and passes its
+    /// `struct Material` layout.
     pub(crate) fn create(
         &mut self,
         desc: &MaterialDesc<'_>,
         textures: &HashMap<TextureId, Texture>,
+        layout: Arc<ParamLayout>,
     ) -> Result<MaterialId, RenderError> {
         if desc.textures.len() > MAX_TEXTURES {
             return Err(RenderError::TooManyTextures { max: MAX_TEXTURES, got: desc.textures.len() });
         }
-        let mut views = [self.white.view(); MAX_TEXTURES];
+        let mut views: [wgpu::TextureView; MAX_TEXTURES] = std::array::from_fn(|_| self.white.view().clone());
         for (slot, id) in views.iter_mut().zip(desc.textures) {
-            *slot = textures.get(id).ok_or(RenderError::UnknownTexture(*id))?.view();
+            *slot = textures.get(id).ok_or(RenderError::UnknownTexture(*id))?.view().clone();
         }
 
-        let device = &self.gpu.device;
-        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("material params"),
-            contents: bytemuck::cast_slice(&desc.params),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let mut defaults = Vec::with_capacity(desc.defaults.len());
+        for (name, value) in &desc.defaults {
+            let param = ParamName::intern(name);
+            match layout.kind_of(param) {
+                None => {
+                    let available: Vec<&str> = layout.infos().iter().map(|i| i.name.as_str()).collect();
+                    return Err(RenderError::UnknownParam { name: name.clone(), available: available.join(", ") });
+                }
+                Some(found) if found != value.kind => {
+                    return Err(RenderError::ParamKindMismatch { name: name.clone(), expected: value.kind, found });
+                }
+                Some(_) => defaults.push((param, *value)),
+            }
+        }
 
+        let (buffer, bind_group) = self.create_binding(&layout, &views);
+        let mut entry = MaterialEntry {
+            shader: desc.shader,
+            bind_group,
+            layout,
+            defaults,
+            default_bytes: Vec::new(),
+            bytes: Vec::new(),
+            uploaded: Vec::new(), // forces an upload on the first frame
+            buffer,
+            views,
+        };
+        entry.default_bytes = default_bytes(&entry.layout, &entry.defaults);
+
+        let id = MaterialId::next();
+        self.entries.insert(id, entry);
+        Ok(id)
+    }
+
+    fn create_binding(&self, layout: &ParamLayout, views: &[wgpu::TextureView; MAX_TEXTURES]) -> (wgpu::Buffer, wgpu::BindGroup) {
+        let device = &self.gpu.device;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("material params"),
+            size: uniform_size(layout) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("material"),
             layout: &self.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(views[0]) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(views[1]) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(views[2]) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(views[3]) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&views[0]) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&views[1]) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&views[2]) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&views[3]) },
             ],
         });
-
-        let id = MaterialId::next();
-        self.entries.insert(
-            id,
-            MaterialEntry {
-                shader: desc.shader,
-                bind_group,
-                params_buffer,
-                default_params: desc.params,
-                uploaded_params: desc.params,
-            },
-        );
-        Ok(id)
+        (buffer, bind_group)
     }
 
     pub(crate) fn destroy(&mut self, id: MaterialId) {
         self.entries.remove(&id);
     }
 
-    /// Interpolate each material's knobs between two ticks and upload the
-    /// ones that changed. Both ticks set -> lerp; only `curr` -> `curr`;
-    /// neither -> the defaults from creation.
+    /// A shader was recompiled and its `struct Material` may have changed:
+    /// re-lay out every material that uses it. Defaults are kept by name;
+    /// ones whose field disappeared are dropped silently.
+    pub(crate) fn relayout(&mut self, shader: MaterialShader, layout: Arc<ParamLayout>) {
+        let ids: Vec<MaterialId> = self.entries.iter().filter(|(_, e)| e.shader == shader).map(|(id, _)| *id).collect();
+        for id in ids {
+            let size_changed = uniform_size(&self.entries[&id].layout) != uniform_size(&layout);
+            if size_changed {
+                let (buffer, bind_group) = self.create_binding(&layout, &self.entries[&id].views);
+                let entry = self.entries.get_mut(&id).unwrap();
+                entry.buffer = buffer;
+                entry.bind_group = bind_group;
+            }
+            let entry = self.entries.get_mut(&id).unwrap();
+            entry.layout = layout.clone();
+            entry.default_bytes = default_bytes(&entry.layout, &entry.defaults);
+            entry.uploaded.clear(); // force an upload
+        }
+    }
+
+    /// Pack each material's `struct Material` for this frame: defaults,
+    /// overwritten by values set in `curr` (interpolated with `prev` where
+    /// both set the same field). Upload the ones that changed.
     pub(crate) fn update_params(&mut self, prev: &RenderWorld, curr: &RenderWorld, alpha: f32) {
-        for (id, material) in &mut self.entries {
-            let target = match (prev.material_params.get(id), curr.material_params.get(id)) {
-                (Some(p), Some(c)) => std::array::from_fn(|i| p[i].lerp(c[i], alpha)),
-                (None, Some(c)) => *c,
-                _ => material.default_params,
+        for entry in self.entries.values_mut() {
+            entry.bytes.clone_from(&entry.default_bytes);
+        }
+        for (&(material, name), value) in &curr.material_values {
+            let Some(entry) = self.entries.get_mut(&material) else { continue };
+            let value = match prev.material_values.get(&(material, name)) {
+                Some(prev) if prev.kind == value.kind => prev.lerp(value, alpha),
+                _ => *value,
             };
-            if target != material.uploaded_params {
-                self.gpu
-                    .queue
-                    .write_buffer(&material.params_buffer, 0, bytemuck::cast_slice(&target));
-                material.uploaded_params = target;
+            entry.layout.write(&mut entry.bytes, name, &value);
+        }
+        for entry in self.entries.values_mut() {
+            if entry.bytes != entry.uploaded {
+                self.gpu.queue.write_buffer(&entry.buffer, 0, &entry.bytes);
+                entry.uploaded.clone_from(&entry.bytes);
             }
         }
     }
+}
+
+fn default_bytes(layout: &ParamLayout, defaults: &[(ParamName, ParamValue)]) -> Vec<u8> {
+    let mut bytes = vec![0; uniform_size(layout)];
+    for (name, value) in defaults {
+        layout.write(&mut bytes, *name, value);
+    }
+    bytes
 }

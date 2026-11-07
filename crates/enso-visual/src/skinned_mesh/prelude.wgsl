@@ -7,6 +7,9 @@
 //   @vertex   fn vs_main(v: SkinnedVertexIn, i: InstanceIn) -> <your output struct>
 //   @fragment fn fs_main(<your output struct>) -> @location(0) vec4<f32>
 //
+// and may define `struct Material { .. }` / `struct Instance { .. }` exactly
+// as for static meshes (read with `material.<field>` / `instance_data(i)`).
+//
 // Typical vertex shader:
 //
 //   let world = instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0);
@@ -20,15 +23,15 @@ struct SkinnedVertexIn {
     @location(4) weights: vec4<f32>,  // how much each one counts (sum to 1)
 };
 
-// Per-instance data from each `SkinnedDraw`.
+// Fixed per-instance data from each `SkinnedDraw`.
 struct InstanceIn {
     @location(5) model_0: vec4<f32>,
     @location(6) model_1: vec4<f32>,
     @location(7) model_2: vec4<f32>,
     @location(8) model_3: vec4<f32>,
     @location(9) color: vec4<f32>,
-    @location(10) params: vec4<f32>,  // free per-instance knobs
-    @location(11) joint_offset: u32,  // where this instance's matrices start in joint_matrices
+    @location(10) joint_offset: u32,  // where this instance's matrices start in joint_matrices
+    @location(11) param_slot: u32,    // index of this instance's `Instance` block
 };
 
 fn instance_model(i: InstanceIn) -> mat4x4<f32> {
@@ -46,4 +49,11 @@ fn skin_matrix(v: SkinnedVertexIn, i: InstanceIn) -> mat4x4<f32> {
          + joint_matrices[o + v.joints.y] * v.weights.y
          + joint_matrices[o + v.joints.z] * v.weights.z
          + joint_matrices[o + v.joints.w] * v.weights.w;
+}
+
+// Per-instance knobs for every instance of this shader drawn this frame (group 3).
+@group(3) @binding(0) var<storage, read> instances: array<Instance>;
+
+fn instance_data(i: InstanceIn) -> Instance {
+    return instances[i.param_slot];
 }

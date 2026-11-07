@@ -24,23 +24,31 @@ renderer.create_skeleton(&SkeletonDesc) -> Result<SkeletonId>
 renderer.create_skinned_shader(&ShaderDesc) -> Result<SkinnedShaderId>
 renderer.update_skinned_shader(id, &ShaderDesc) -> Result<()>
 renderer.create_material(&MaterialDesc::new(mesh_or_skinned_shader)) -> Result<MaterialId>
+    // .with_param("base_color", Vec3::ONE) sets a `struct Material` default
 renderer.create_sky_shader(&SkyShaderDesc) -> Result<SkyShaderId>
 renderer.update_sky_shader(id, &SkyShaderDesc) -> Result<()>
 renderer.destroy_*(id)
 
+// Named parameters (see "Named parameters" below)
+renderer.material_params(material) -> Option<&[ParamInfo]>       // list fields (GUI)
+renderer.instance_params(material) -> Option<&[ParamInfo]>
+renderer.material_param::<f32>(material, "decay") -> Result<Param<f32>>   // checked handle
+renderer.instance_param::<f32>(material, "velocity") -> Result<Param<f32>>
+
 // Per simulation tick: plain data
 world.camera / world.time / world.clear_color
-world.sky = Some(Sky::new(sky_shader).with_params([Vec4; 4]))     // kept by clear()
-world.draw_mesh(MeshDraw::new(mesh, material, transform).with_key(k))
-world.draw_skinned(SkinnedDraw::new(mesh, skeleton, material, transform).with_key(k), &pose)
-world.set_material_params(material, [Vec4; 4])
+world.sky = Some(sky_material)          // a material of a sky shader; kept by clear()
+world.draw_mesh(MeshDraw::new(mesh, material, transform).with_key(k)).with(velocity, 0.8).with(age, 0.1)
+world.draw_skinned(SkinnedDraw::new(mesh, skeleton, material, transform).with_key(k), &pose).with(..)
+world.set_param(material, decay, 2.5)
 
 // Per display frame
 renderer.render(RenderTarget, &prev, &curr, alpha)
 ```
 
 Crate-root types shared by subrenderers: `ShaderDesc`, `BlendMode`,
-`MaterialDesc`, `MaterialShader`, `MAX_TEXTURES`, `Transform`, `Camera`.
+`MaterialDesc`, `MaterialShader`, `MAX_TEXTURES`, `Transform`, `Camera`,
+`Param`, `ParamType`, `ParamKind`, `ParamInfo`, `InstanceParams`.
 Per-subrenderer contract types live in `static_mesh::`, `skinned_mesh::`, `sky::`.
 
 ## Files
@@ -50,17 +58,18 @@ Per-subrenderer contract types live in `static_mesh::`, `skinned_mesh::`, `sky::
 | `src/lib.rs` | Module list + `pub use` re-exports + **`pub trait Renderer`** (the interface, with its docs) |
 | `src/renderer.rs` | `WgpuRenderer` (implements `Renderer`): globals, depth buffer, textures, materials, owns subrenderers, `render()`; inherent `new`/`gpu`/`color_format` |
 | `src/subrenderer.rs` | `pub(crate)` `SubRenderer` trait (`prepare`, `draw`), `RenderContext`, `FrameData`, `DrawData` |
-| `src/world.rs` | `RenderWorld` (incl. packed `poses` for skinned draws), `MaterialParams` |
+| `src/world.rs` | `RenderWorld` (material values, packed instance values + poses, `Span`), `InstanceParams` builder |
 | `src/ids.rs` | `define_id!` macro: all resource ID types |
-| `src/shader.rs` | `GLOBALS_WGSL`, `ShaderDesc`, `BlendMode`, `compose()`, `capture_errors()`, `mesh_pipeline()` |
-| `src/material.rs` + `material.wgsl` | `MaterialDesc`/`MaterialShader` (public), `MaterialStore` (internal), group-1 WGSL |
-| `src/instancing.rs` | `InstanceBatches`: sort draws by `BatchKey`, merge into instanced batches, upload |
-| `src/static_mesh/` | `MeshDraw`, `MeshData`/`Vertex`, `PRELUDE` (loc 0-2 vertex, 3-8 instance); private `StaticMeshRenderer` |
-| `src/skinned_mesh/mod.rs` | `SkinnedDraw`, `PRELUDE` (loc 0-4 vertex, 5-11 instance, group 2 joints) |
+| `src/params.rs` | `Param<T>`/`ParamType`/`ParamKind`/`ParamInfo` (public); `ParamName` interning, `ParamValue`, `ParamLayout` (naga reflection, `pack`, `write`), `declares_struct` + tests |
+| `src/shader.rs` | `GLOBALS_WGSL`, `ShaderDesc`, `BlendMode`, `compose()`, `compose_mesh()` (placeholder structs), `reflect_params()`, `capture_errors()`, `mesh_pipeline()` |
+| `src/material.rs` + `material.wgsl` | `MaterialDesc` (`with_param` defaults)/`MaterialShader` (public), `MaterialStore` (per-material layout, packing, `relayout` on hot reload), group-1 WGSL |
+| `src/instancing.rs` | `InstanceBatches`: sort by `BatchKey`, batch, instance vertex buffer + per-shader parameter segments (storage buffer, one bind group per segment) |
+| `src/static_mesh/` | `MeshDraw`, `MeshData`/`Vertex`, `PRELUDE` (loc 0-2 vertex, 3-8 instance incl. `param_slot`, group 2 `instances`); private `StaticMeshRenderer` |
+| `src/skinned_mesh/mod.rs` | `SkinnedDraw`, `PRELUDE` (loc 0-4 vertex, 5-11 instance, group 2 joints, group 3 `instances`) |
 | `src/skinned_mesh/skeleton.rs` | `SkeletonDesc` (public, `chain()`), `Skeleton` (validation, inverse binds, skinning matrices) + tests |
 | `src/skinned_mesh/geometry.rs` | `SkinnedVertex`, `SkinnedMeshData::tube` + tests |
 | `src/skinned_mesh/renderer.rs` | Private `SkinnedMeshRenderer`: pose interpolation, joint storage buffer, batching |
-| `src/sky/` | `Sky`, `SkyShaderDesc`, `PRELUDE` (provides `sky_vs_main`, `sky_view_dir()`); private `SkyRenderer` |
+| `src/sky/` | `SkyShaderDesc`, `PRELUDE` (fixed `sky_vs_main` outputting `SkyIn { view_dir, uv, ndc }`); private `SkyRenderer` (draws `world.sky`'s material) |
 | `src/offscreen.rs` | `OffscreenTarget`: render into a texture, `read_pixels` back to the CPU |
 | `examples/common/mod.rs` | Example harness: `Example` trait, `Setup`, `Simulation`, shader hot reload, helpers |
 | `examples/common/window.rs` | Interactive winit window + real-time loop (`common::run`) |
@@ -69,6 +78,7 @@ Per-subrenderer contract types live in `static_mesh::`, `skinned_mesh::`, `sky::
 | `examples/static_mesh.rs` | Cubes + wobbling sphere at a 20 Hz sim |
 | `examples/sky.rs` | Gradient sky with a moving sun behind a ring of cubes |
 | `examples/tentacles.rs` | Skinned tubes on joint chains, swaying with travelling waves |
+| `examples/notes.rs` | Named parameters: keys struck by a melody (material + instance structs) and sparks (a second shader with a different `Instance` stride) |
 | `tests/examples_have_golden_tests.rs` | Guard: every example is registered as a golden test |
 
 ## Example harness
@@ -133,17 +143,27 @@ window, build it with `cargo build -p enso-visual --example <name>` first.
 ## Shader composition
 
 The final WGSL is `GLOBALS_WGSL` + shared parts + subrenderer `PRELUDE` +
-user source (`shader::compose(parts, source)`):
+user source (`shader::compose(parts, source)`; mesh-like subrenderers use
+`compose_mesh`, which also appends `struct Material { _unused: vec4<f32> }`
+/ `struct Instance { .. }` placeholders when the user source doesn't
+declare them, since the preludes bind both):
 
 | Subrenderer | Parts | User writes |
 |---|---|---|
-| static mesh | `MATERIAL_WGSL`, `static_mesh::PRELUDE` | `vs_main(VertexIn, InstanceIn)`, `fs_main` |
-| skinned mesh | `MATERIAL_WGSL`, `skinned_mesh::PRELUDE` | `vs_main(SkinnedVertexIn, InstanceIn)`, `fs_main` |
-| sky | `sky::PRELUDE` (contains `sky_vs_main`) | `fs_main(SkyIn)` |
+| static mesh | `MATERIAL_WGSL`, `static_mesh::PRELUDE` | `vs_main(VertexIn, InstanceIn)`, `fs_main`; optional `struct Material`, `struct Instance` |
+| skinned mesh | `MATERIAL_WGSL`, `skinned_mesh::PRELUDE` | `vs_main(SkinnedVertexIn, InstanceIn)`, `fs_main`; optional structs |
+| sky | `MATERIAL_WGSL`, `sky::PRELUDE` (contains `sky_vs_main`) | `fs_main(SkyIn)`; optional `struct Material` |
 
-Bind groups: 0 = globals (`view_proj`, `inv_view_proj`, camera, resolution,
-time; one shared layout); 1 = material (mesh and skinned) or sky params;
-2 = skinned joint matrices (storage buffer, vertex stage).
+Bind groups:
+
+| Group | Static mesh | Skinned mesh | Sky |
+|---|---|---|---|
+| 0 | globals | globals | globals |
+| 1 | material (uniform `Material` + sampler + 4 textures) | material | material |
+| 2 | `instances: array<Instance>` (storage) | joint matrices (storage) | |
+| 3 | | `instances: array<Instance>` (storage) | |
+
+(Default `max_bind_groups` is 4: a new group needs care.)
 Rust ↔ WGSL layouts must match byte for byte: `GlobalsUniform` ↔ `Globals`,
 each `InstanceRaw` ↔ its `InstanceIn`, `Vertex`/`SkinnedVertex` ↔ vertex inputs.
 
@@ -158,15 +178,20 @@ globals + parts length. Mapping them back to the user file is a known TODO.
 
 1. Interpolate camera, time, clear colour; compute `delta_time` from the
    last rendered time; write the globals uniform.
-2. `MaterialStore::update_params`: interpolate each material's knobs and
-   upload the changed ones (shared by both mesh subrenderers).
+2. `MaterialStore::update_params`: per material, start from its default
+   bytes, write each `curr` value (lerped with `prev`'s same field) at its
+   reflected offset, upload if the bytes changed.
 3. `prepare()` on each subrenderer, in draw order:
-   - **sky**: pick `curr.sky`; lerp params with `prev.sky` if the shader
-     matches; upload if changed.
+   - **sky**: pick `curr.sky`'s material if its shader is a sky shader
+     (its knobs were already interpolated and uploaded in step 2).
    - **static mesh**: match draws by `key` between prev/curr; interpolate;
-     skip draws whose material is missing or not a `Mesh` shader; push
-     into `InstanceBatches` (sorted by `(blended, shader, material, mesh)`,
-     merged into instanced batches, uploaded).
+     skip draws whose material is missing or not a `Mesh` shader; pack the
+     draw's `struct Instance` block (`ParamLayout::pack`, lerping by name
+     with the matched prev draw's values); push into `InstanceBatches`.
+     `upload` sorts by `(blended, shader, material, mesh)`, merges batches,
+     assigns each instance a `param_slot` within its shader's segment,
+     lays segments out at `min_storage_buffer_offset_alignment`, uploads
+     both buffers and creates one bind group per segment.
    - **skinned mesh**: as static, plus for each draw: interpolate the pose
      joint by joint (if prev has the same skeleton and pose length), run
      `Skeleton::skinning_matrices` (walk parents → model space → times
@@ -182,19 +207,51 @@ globals + parts length. Mapping them back to the user file is a known TODO.
 ## Interpolation semantics
 
 - Draws match by `key` (unique per world, per draw type). Matched draws lerp
-  translation and scale, slerp rotation, lerp colour and params. Mesh,
-  material (and skeleton) come from `curr`.
+  translation and scale, slerp rotation, lerp colour. Mesh, material (and
+  skeleton) come from `curr`.
+- Instance parameters: per field *name*, lerp with the matched prev draw's
+  value of the same kind; otherwise `curr`'s; unset fields are 0.
 - Skinned poses: per-joint `Transform::lerp` of *local* transforms when
   both ticks used the same skeleton with the same pose length; otherwise
   `curr`'s pose. Missing trailing joints use the rest pose.
 - Unkeyed draws, or draws new this tick, render as given. Draws missing
   from `curr` vanish.
-- Material params: both ticks set → lerp; only curr → curr; else the
-  defaults from `MaterialDesc`.
-- Sky params: lerp when both ticks have a sky with the same shader, else
-  `curr`. The sky persists across `RenderWorld::clear()`.
+- Material parameters: per field, both ticks set → lerp; only curr →
+  curr; else the default from `MaterialDesc::with_param` (or 0). Values are
+  per tick, not persistent: set them every tick you want them.
+- The sky is a material, so its knobs interpolate like any material's.
+  `world.sky` persists across `RenderWorld::clear()`; switching to another
+  sky material is a cut (no crossfade).
+- Sky view direction: computed per vertex (far-plane point via
+  `inv_view_proj` minus the eye), *unnormalised*, and interpolated. This is
+  exact for perspective cameras because the far-plane point is affine in
+  screen position. Shaders must `normalize(in.view_dir)`.
 - `alpha` is clamped to 0..1. Passing the same world twice = no interpolation.
 - No "snap/teleport" flag yet (proposed).
+
+## Named parameters
+
+- A mesh-like shader may declare `struct Material` (per material,
+  `material.<field>`) and `struct Instance` (per instance,
+  `instance_data(i).<field>` in the vertex stage; pass to the fragment
+  stage yourself). Fields: `f32`, `vec2/3/4<f32>`; names starting with `_`
+  are padding (any type, never exposed). Anything else is a
+  `RenderError::ShaderParams` at compile time.
+- At shader creation the composed source is parsed again with
+  `wgpu::naga` and the struct bound at group 1 (Material) and the
+  instance group is read: names, kinds, byte offsets (naga applies WGSL's
+  uniform/storage layout rules, e.g. `vec3` aligns to 16), and the struct
+  size, which becomes the uniform buffer size or the storage array stride.
+- `Param<T>` is an interned *name* + type marker, not an offset. Hot reload
+  re-reflects; `MaterialStore::relayout` rebuilds buffers/bind groups if the
+  size changed; handles keep working; values for vanished fields or a
+  changed kind are ignored silently.
+- `Renderer::material_param` / `instance_param` are provided trait methods
+  built on `material_params` / `instance_params` (the field lists), so every
+  implementation gets checked handles for free.
+- The sky uses the same mechanism: `MaterialShader::Sky`, `struct Material`
+  in the sky shader, `world.set_param(sky_material, ..)`.
+  `instance_params` of a sky material is an empty list.
 
 ## Skinning model
 

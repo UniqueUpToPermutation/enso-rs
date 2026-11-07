@@ -6,7 +6,7 @@ use bytemuck::Zeroable as _;
 use wgpu::util::DeviceExt;
 
 use crate::{
-    Gpu, MaterialId, MeshId, MeshShaderId, RenderError, RenderWorld, Renderer, ShaderDesc, SkeletonId,
+    Gpu, MaterialId, MeshId, MeshShaderId, ParamInfo, RenderError, RenderWorld, Renderer, ShaderDesc, SkeletonId,
     SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextureId,
     material::{MaterialDesc, MaterialShader, MaterialStore},
     skinned_mesh::{SkeletonDesc, SkinnedMeshData, SkinnedMeshRenderer},
@@ -197,7 +197,9 @@ impl Renderer for WgpuRenderer {
     }
 
     fn update_mesh_shader(&mut self, id: MeshShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
-        self.static_mesh.update_shader(id, desc)
+        let layout = self.static_mesh.update_shader(id, desc)?;
+        self.materials.relayout(MaterialShader::Mesh(id), layout);
+        Ok(())
     }
 
     fn destroy_mesh_shader(&mut self, id: MeshShaderId) {
@@ -227,7 +229,9 @@ impl Renderer for WgpuRenderer {
     }
 
     fn update_skinned_shader(&mut self, id: SkinnedShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
-        self.skinned_mesh.update_shader(id, desc)
+        let layout = self.skinned_mesh.update_shader(id, desc)?;
+        self.materials.relayout(MaterialShader::Skinned(id), layout);
+        Ok(())
     }
 
     fn destroy_skinned_shader(&mut self, id: SkinnedShaderId) {
@@ -237,17 +241,33 @@ impl Renderer for WgpuRenderer {
     // ---- materials ----
 
     fn create_material(&mut self, desc: &MaterialDesc<'_>) -> Result<MaterialId, RenderError> {
-        match desc.shader {
-            MaterialShader::Mesh(id) if !self.static_mesh.has_shader(id) => Err(RenderError::UnknownShader(id)),
-            MaterialShader::Skinned(id) if !self.skinned_mesh.has_shader(id) => {
-                Err(RenderError::UnknownSkinnedShader(id))
+        let layout = match desc.shader {
+            MaterialShader::Mesh(id) => self.static_mesh.material_layout(id).ok_or(RenderError::UnknownShader(id))?,
+            MaterialShader::Skinned(id) => {
+                self.skinned_mesh.material_layout(id).ok_or(RenderError::UnknownSkinnedShader(id))?
             }
-            _ => self.materials.create(desc, &self.textures),
-        }
+            MaterialShader::Sky(id) => self.sky.material_layout(id).ok_or(RenderError::UnknownSkyShader(id))?,
+        };
+        self.materials.create(desc, &self.textures, layout)
     }
 
     fn destroy_material(&mut self, id: MaterialId) {
         self.materials.destroy(id);
+    }
+
+    // ---- named parameters ----
+
+    fn material_params(&self, material: MaterialId) -> Option<&[ParamInfo]> {
+        Some(self.materials.get(material)?.layout.infos())
+    }
+
+    fn instance_params(&self, material: MaterialId) -> Option<&[ParamInfo]> {
+        let layout = match self.materials.get(material)?.shader {
+            MaterialShader::Mesh(id) => self.static_mesh.instance_layout(id)?,
+            MaterialShader::Skinned(id) => self.skinned_mesh.instance_layout(id)?,
+            MaterialShader::Sky(_) => return Some(&[]), // the sky has no instances
+        };
+        Some(layout.infos())
     }
 
     // ---- sky ----
@@ -257,7 +277,9 @@ impl Renderer for WgpuRenderer {
     }
 
     fn update_sky_shader(&mut self, id: SkyShaderId, desc: &SkyShaderDesc<'_>) -> Result<(), RenderError> {
-        self.sky.update_shader(id, desc)
+        let layout = self.sky.update_shader(id, desc)?;
+        self.materials.relayout(MaterialShader::Sky(id), layout);
+        Ok(())
     }
 
     fn destroy_sky_shader(&mut self, id: SkyShaderId) {

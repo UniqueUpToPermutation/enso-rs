@@ -23,7 +23,7 @@ pub use geometry::{SkinnedMeshData, SkinnedVertex};
 pub(crate) use renderer::SkinnedMeshRenderer;
 pub use skeleton::SkeletonDesc;
 
-use crate::{MaterialId, SkeletonId, SkinnedMeshId, Transform};
+use crate::{MaterialId, SkeletonId, SkinnedMeshId, Transform, world::Span};
 
 /// The WGSL contract prepended to every skinned mesh shader (after the
 /// globals and material declarations).
@@ -36,7 +36,7 @@ pub const PRELUDE: &str = include_str!("prelude.wgsl");
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SkinnedDraw {
     /// Stable identity across ticks; see [`MeshDraw::key`](crate::static_mesh::MeshDraw::key).
-    /// Matched draws interpolate their transform, colour, params and,
+    /// Matched draws interpolate their transform, colour, parameters and,
     /// if they use the same skeleton, every joint of the pose.
     pub key: Option<u64>,
     pub mesh: SkinnedMeshId,
@@ -45,16 +45,10 @@ pub struct SkinnedDraw {
     pub material: MaterialId,
     pub transform: Transform,
     pub color: Vec4,
-    pub params: Vec4,
-    /// Where this draw's pose sits in `RenderWorld::poses`.
-    pub(crate) pose: PoseRange,
-}
-
-/// A slice of `RenderWorld::poses`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct PoseRange {
-    pub start: u32,
-    pub len: u32,
+    /// Where this draw's pose sits in the world's packed poses.
+    pub(crate) pose: Span,
+    /// This draw's `struct Instance` values in the world's packed array.
+    pub(crate) params: Span,
 }
 
 impl SkinnedDraw {
@@ -71,8 +65,8 @@ impl SkinnedDraw {
             material,
             transform: transform.into(),
             color: Vec4::ONE,
-            params: Vec4::ZERO,
-            pose: PoseRange::default(),
+            pose: Span::default(),
+            params: Span::default(),
         }
     }
     pub fn with_key(mut self, key: u64) -> Self {
@@ -81,10 +75,6 @@ impl SkinnedDraw {
     }
     pub fn with_color(mut self, color: Vec4) -> Self {
         self.color = color;
-        self
-    }
-    pub fn with_params(mut self, params: Vec4) -> Self {
-        self.params = params;
         self
     }
 }

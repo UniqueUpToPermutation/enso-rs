@@ -21,7 +21,10 @@
 //!   prelude prepended to your code (see [`static_mesh::PRELUDE`],
 //!   [`skinned_mesh::PRELUDE`], [`sky::PRELUDE`]).
 //! * **Materials** ([`MaterialDesc`]) bind a mesh or skinned shader to
-//!   textures and knobs; they are shared by both mesh subrenderers.
+//!   textures; they are shared by both mesh subrenderers.
+//! * **Named parameters**: a shader declares `struct Material { .. }` and/or
+//!   `struct Instance { .. }`; the renderer reflects their layouts, and you
+//!   set fields by name ([`Param`]) per tick, interpolated like everything else.
 
 mod camera;
 mod error;
@@ -30,6 +33,7 @@ mod ids;
 mod instancing;
 mod material;
 mod offscreen;
+mod params;
 mod renderer;
 mod shader;
 pub mod skinned_mesh;
@@ -48,11 +52,12 @@ pub use gpu::{Gpu, GpuError};
 pub use ids::{MaterialId, MeshId, MeshShaderId, SkeletonId, SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextureId};
 pub use material::{MAX_TEXTURES, MaterialDesc, MaterialShader};
 pub use offscreen::OffscreenTarget;
+pub use params::{Param, ParamInfo, ParamKind, ParamType};
 pub use renderer::{DEPTH_FORMAT, RenderTarget, WgpuRenderer};
 pub use shader::{BlendMode, GLOBALS_WGSL, ShaderDesc};
 pub use texture::TextureDesc;
 pub use transform::Transform;
-pub use world::{MaterialParams, RenderWorld};
+pub use world::{InstanceParams, RenderWorld};
 
 // Let downstream crates use exactly our versions of these without adding
 // their own dependency (avoids version mismatches).
@@ -133,6 +138,31 @@ pub trait Renderer {
 
     fn destroy_material(&mut self, id: MaterialId);
 
+    // ---- named parameters ----
+
+    /// The fields of the material's `struct Material` (what
+    /// [`RenderWorld::set_param`] can set), e.g. to build a control panel.
+    /// `None` if the material doesn't exist.
+    fn material_params(&self, material: MaterialId) -> Option<&[ParamInfo]>;
+
+    /// The fields of the `struct Instance` declared by the material's shader
+    /// (what [`InstanceParams::with`] can set on draws using this material).
+    fn instance_params(&self, material: MaterialId) -> Option<&[ParamInfo]>;
+
+    /// A handle to the `struct Material` field `name`, checked to exist
+    /// with type `T`.
+    fn material_param<T: ParamType>(&self, material: MaterialId, name: &str) -> Result<Param<T>, RenderError> {
+        let fields = self.material_params(material).ok_or(RenderError::UnknownMaterial(material))?;
+        checked_param(fields, name)
+    }
+
+    /// A handle to the `struct Instance` field `name` of the material's
+    /// shader, checked to exist with type `T`.
+    fn instance_param<T: ParamType>(&self, material: MaterialId, name: &str) -> Result<Param<T>, RenderError> {
+        let fields = self.instance_params(material).ok_or(RenderError::UnknownMaterial(material))?;
+        checked_param(fields, name)
+    }
+
     // ---- sky ----
 
     /// Compile a sky shader against the sky contract ([`sky::PRELUDE`]):
@@ -154,4 +184,17 @@ pub trait Renderer {
     /// into the next (not yet simulated) tick. To render a single world
     /// without interpolation, pass it as both `prev` and `curr`.
     fn render(&mut self, target: Self::Target<'_>, prev: &RenderWorld, curr: &RenderWorld, alpha: f32);
+}
+
+fn checked_param<T: ParamType>(fields: &[ParamInfo], name: &str) -> Result<Param<T>, RenderError> {
+    match fields.iter().find(|f| f.name == name) {
+        Some(field) if field.kind == T::KIND => Ok(Param::new(name)),
+        Some(field) => {
+            Err(RenderError::ParamKindMismatch { name: name.to_owned(), expected: T::KIND, found: field.kind })
+        }
+        None => {
+            let available: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+            Err(RenderError::UnknownParam { name: name.to_owned(), available: available.join(", ") })
+        }
+    }
 }

@@ -1,4 +1,7 @@
-use crate::ids::{MeshShaderId, SkinnedShaderId, SkyShaderId, TextureId};
+use crate::{
+    ids::{MaterialId, MeshShaderId, SkinnedShaderId, SkyShaderId, TextureId},
+    params::ParamKind,
+};
 
 /// Everything that can go wrong when creating or updating render resources.
 #[derive(Debug, thiserror::Error)]
@@ -26,6 +29,18 @@ pub enum RenderError {
 
     #[error("invalid skeleton: {0}")]
     InvalidSkeleton(String),
+
+    #[error("shader `{label}` has an unsupported parameter struct: {message}")]
+    ShaderParams { label: String, message: String },
+
+    #[error("unknown material {0:?} (never created, or destroyed)")]
+    UnknownMaterial(MaterialId),
+
+    #[error("no parameter `{name}`; available: {available}")]
+    UnknownParam { name: String, available: String },
+
+    #[error("parameter `{name}` is {found:?}, not {expected:?}")]
+    ParamKindMismatch { name: String, expected: ParamKind, found: ParamKind },
 
     #[error("failed to read pixels back from the GPU: {0}")]
     Readback(String),

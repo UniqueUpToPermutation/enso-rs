@@ -7,13 +7,24 @@ use glam::Vec4;
 
 use crate::{
     Camera, MaterialId, Transform,
-    skinned_mesh::{PoseRange, SkinnedDraw},
-    sky::Sky,
+    params::{Param, ParamName, ParamType, ParamValue},
+    skinned_mesh::SkinnedDraw,
     static_mesh::MeshDraw,
 };
 
-/// The four `vec4` knobs of a material (`material.params[0..4]` in WGSL).
-pub type MaterialParams = [Vec4; 4];
+/// A slice of one of `RenderWorld`'s packed arrays (poses, instance values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Span {
+    pub start: u32,
+    pub len: u32,
+}
+
+impl Span {
+    fn of<T>(self, items: &[T]) -> &[T] {
+        let start = self.start as usize;
+        items.get(start..start + self.len as usize).unwrap_or(&[])
+    }
+}
 
 /// Everything the renderer should draw for one simulation tick.
 ///
@@ -26,7 +37,7 @@ pub type MaterialParams = [Vec4; 4];
 ///
 /// ```ignore
 /// prev.clone_from(&curr);  // copy, reusing prev's allocations
-/// curr.clear();            // draws/params gone; camera, time, clear colour carry over
+/// curr.clear();            // draws/values gone; camera, time, clear colour, sky carry over
 /// simulate(&mut curr);     // fill in this tick
 /// ```
 ///
@@ -43,18 +54,22 @@ pub struct RenderWorld {
     /// Linear RGBA. Visible wherever nothing is drawn (i.e. when there is
     /// no sky).
     pub clear_color: Vec4,
-    /// Drawn first, behind everything. Like the camera, it is kept by
-    /// [`clear`](Self::clear); set it to `None` to remove it.
-    pub sky: Option<Sky>,
-    /// Static mesh instances.
+    /// A material whose shader is a sky shader
+    /// ([`SkyShaderId`](crate::SkyShaderId)), drawn first, behind everything.
+    /// Its knobs are set with [`set_param`](Self::set_param) like any
+    /// material's. Like the camera, it is kept by [`clear`](Self::clear);
+    /// set it to `None` to remove it.
+    pub sky: Option<MaterialId>,
+    /// Static mesh instances. Add with [`draw_mesh`](Self::draw_mesh).
     pub meshes: Vec<MeshDraw>,
     /// Skinned mesh instances. Add with [`draw_skinned`](Self::draw_skinned).
     pub skinned: Vec<SkinnedDraw>,
-    /// Per-tick material knob values. Materials not listed fall back to the
-    /// params they were created with.
-    pub material_params: HashMap<MaterialId, MaterialParams>,
-    /// Joint transforms of every skinned draw, packed one after another so
-    /// a tick's poses don't need an allocation each.
+
+    /// Material parameter values set this tick ([`set_param`](Self::set_param)).
+    pub(crate) material_values: HashMap<(MaterialId, ParamName), ParamValue>,
+    /// Per-instance parameter values of every draw, packed.
+    instance_values: Vec<(ParamName, ParamValue)>,
+    /// Joint transforms of every skinned draw, packed.
     poses: Vec<Transform>,
 }
 
@@ -67,7 +82,8 @@ impl Default for RenderWorld {
             sky: None,
             meshes: Vec::new(),
             skinned: Vec::new(),
-            material_params: HashMap::new(),
+            material_values: HashMap::new(),
+            instance_values: Vec::new(),
             poses: Vec::new(),
         }
     }
@@ -78,37 +94,73 @@ impl RenderWorld {
         Self::default()
     }
 
-    /// Remove all draws and material params, keeping allocated capacity.
+    /// Remove all draws and parameter values, keeping allocated capacity.
     /// Time, camera, clear colour and sky are left as they are.
     pub fn clear(&mut self) {
         self.meshes.clear();
         self.skinned.clear();
-        self.material_params.clear();
+        self.material_values.clear();
+        self.instance_values.clear();
         self.poses.clear();
     }
 
-    pub fn draw_mesh(&mut self, draw: MeshDraw) {
+    /// Set a field of a material's `struct Material` for this tick.
+    /// Values are interpolated with the previous tick's; fields not set
+    /// this tick use the material's defaults.
+    pub fn set_param<T: ParamType>(&mut self, material: MaterialId, param: Param<T>, value: T) {
+        let (name, value) = param.value(value);
+        self.material_values.insert((material, name), value);
+    }
+
+    /// Draw a static mesh. Chain [`with`](InstanceParams::with) to set
+    /// fields of its shader's `struct Instance`:
+    ///
+    /// ```ignore
+    /// world.draw_mesh(draw).with(velocity, 0.8).with(age, 0.1);
+    /// ```
+    pub fn draw_mesh(&mut self, mut draw: MeshDraw) -> InstanceParams<'_> {
+        draw.params = Span { start: self.instance_values.len() as u32, len: 0 };
         self.meshes.push(draw);
+        InstanceParams { values: &mut self.instance_values, span: &mut self.meshes.last_mut().unwrap().params }
     }
 
     /// Draw a skinned mesh in `pose`: the *local* transform of each joint,
     /// in skeleton order (start from the skeleton's
     /// [`rest_pose`](crate::skinned_mesh::SkeletonDesc::rest_pose) and change
     /// what moves). Missing trailing joints use the rest pose; an empty
-    /// pose draws the rest pose.
-    pub fn draw_skinned(&mut self, mut draw: SkinnedDraw, pose: &[Transform]) {
-        draw.pose = PoseRange { start: self.poses.len() as u32, len: pose.len() as u32 };
+    /// pose draws the rest pose. Chain [`with`](InstanceParams::with) to set
+    /// per-instance parameters.
+    pub fn draw_skinned(&mut self, mut draw: SkinnedDraw, pose: &[Transform]) -> InstanceParams<'_> {
+        draw.pose = Span { start: self.poses.len() as u32, len: pose.len() as u32 };
         self.poses.extend_from_slice(pose);
+        draw.params = Span { start: self.instance_values.len() as u32, len: 0 };
         self.skinned.push(draw);
+        InstanceParams { values: &mut self.instance_values, span: &mut self.skinned.last_mut().unwrap().params }
     }
 
-    /// The pose given with `draw` (which must belong to this world).
     pub(crate) fn pose_of(&self, draw: &SkinnedDraw) -> &[Transform] {
-        let start = draw.pose.start as usize;
-        self.poses.get(start..start + draw.pose.len as usize).unwrap_or(&[])
+        draw.pose.of(&self.poses)
     }
 
-    pub fn set_material_params(&mut self, material: MaterialId, params: MaterialParams) {
-        self.material_params.insert(material, params);
+    pub(crate) fn instance_values(&self, span: Span) -> &[(ParamName, ParamValue)] {
+        span.of(&self.instance_values)
+    }
+}
+
+/// Sets per-instance parameters of the draw just added. Returned by
+/// [`RenderWorld::draw_mesh`] and [`RenderWorld::draw_skinned`]; ignoring it
+/// is fine (the instance then gets zeros).
+pub struct InstanceParams<'w> {
+    values: &'w mut Vec<(ParamName, ParamValue)>,
+    span: &'w mut Span,
+}
+
+impl InstanceParams<'_> {
+    /// Set one field of the shader's `struct Instance` for this instance.
+    /// Interpolated with the same keyed draw's value from the previous tick.
+    pub fn with<T: ParamType>(self, param: Param<T>, value: T) -> Self {
+        self.values.push(param.value(value));
+        self.span.len += 1;
+        self
     }
 }

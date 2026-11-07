@@ -10,7 +10,7 @@ mod common;
 
 use common::{Example, Setup, checkerboard, hue};
 use enso_visual::{
-    BlendMode, Camera, MaterialDesc, MaterialId, MeshId, RenderWorld, Renderer, TextureDesc, Transform,
+    BlendMode, Camera, MaterialDesc, MaterialId, MeshId, Param, RenderWorld, Renderer, TextureDesc, Transform,
     glam::{EulerRot, Quat, Vec3, Vec4},
     static_mesh::{MeshData, MeshDraw},
 };
@@ -24,6 +24,9 @@ struct StaticMesh {
     sphere: MeshId,
     cube_material: MaterialId,
     blob_material: MaterialId,
+    /// `struct Material` fields of wobble.wgsl.
+    glow_color: Param<Vec3>,
+    wobble: Param<f32>,
 }
 
 const CUBE_COUNT: u64 = 12;
@@ -44,13 +47,17 @@ impl Example for StaticMesh {
             .create_texture(&TextureDesc::rgba8(64, 64, Some(&pixels)).with_label("checker"))
             .unwrap();
 
+        let blob_material = renderer.create_material(&MaterialDesc::new(wobble)).unwrap();
         Self {
             cube: renderer.create_mesh(&MeshData::cube(0.8)),
             sphere: renderer.create_mesh(&MeshData::uv_sphere(1.2, 64, 32)),
             cube_material: renderer
                 .create_material(&MaterialDesc::new(lit).with_textures(&[checker]))
                 .unwrap(),
-            blob_material: renderer.create_material(&MaterialDesc::new(wobble)).unwrap(),
+            blob_material,
+            // Checked: these fail here if wobble.wgsl lacks the field or it has another type.
+            glow_color: renderer.material_param(blob_material, "glow_color").unwrap(),
+            wobble: renderer.material_param(blob_material, "wobble").unwrap(),
         }
     }
 
@@ -81,16 +88,9 @@ impl Example for StaticMesh {
             );
         }
 
-        // Material knobs: where MIDI CCs will plug in later.
-        world.set_material_params(
-            self.blob_material,
-            [
-                hue(t * 0.05),                                           // params[0]: glow colour
-                Vec4::new(0.08 + 0.06 * (t * 0.5).sin(), 0.0, 0.0, 0.0), // params[1].x: wobble
-                Vec4::ZERO,
-                Vec4::ZERO,
-            ],
-        );
+        // Material knobs, by name: where MIDI CCs will plug in later.
+        world.set_param(self.blob_material, self.glow_color, hue(t * 0.05).truncate());
+        world.set_param(self.blob_material, self.wobble, 0.08 + 0.06 * (t * 0.5).sin());
         world.draw_mesh(MeshDraw::new(self.sphere, self.blob_material, Transform::IDENTITY).with_key(SPHERE_KEY));
     }
 }

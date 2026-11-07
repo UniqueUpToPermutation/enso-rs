@@ -1,6 +1,11 @@
 // A breathing sphere: the vertex shader displaces along the normal, the
-// fragment shader adds a rim glow. `material.params[0]` is the glow colour,
-// `material.params[1].x` the wobble amount (set from Rust each frame).
+// fragment shader adds a rim glow. Its knobs are the `Material` fields
+// below, set by name from Rust each tick.
+
+struct Material {
+    glow_color: vec3<f32>,
+    wobble: f32,  // displacement amount
+};
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -11,8 +16,7 @@ struct VsOut {
 @vertex
 fn vs_main(v: VertexIn, i: InstanceIn) -> VsOut {
     let model = instance_model(i);
-    let amount = material.params[1].x;
-    let wave = sin(globals.time * 3.0 + v.position.y * 8.0) * amount;
+    let wave = sin(globals.time * 3.0 + v.position.y * 8.0) * material.wobble;
     let displaced = v.position + v.normal * wave;
 
     let world = model * vec4<f32>(displaced, 1.0);
@@ -28,6 +32,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let view_dir = normalize(globals.camera_position.xyz - in.world_pos);
     let rim = pow(1.0 - max(dot(normalize(in.normal), view_dir), 0.0), 3.0);
     let base = vec3<f32>(0.05, 0.05, 0.08);
-    let glow = material.params[0].rgb * rim * 2.0;
+    let glow = material.glow_color * rim * 2.0;
     return vec4<f32>(base + glow, 1.0);
 }

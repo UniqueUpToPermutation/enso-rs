@@ -1,6 +1,6 @@
 //! The skinned mesh subrenderer (private implementation).
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use glam::Mat4;
 use wgpu::util::DeviceExt;
@@ -8,20 +8,32 @@ use wgpu::util::DeviceExt;
 use super::{PRELUDE, SkeletonDesc, SkinnedMeshData, SkinnedVertex, skeleton::Skeleton};
 use crate::{
     BlendMode, RenderError, ShaderDesc, SkeletonId, SkinnedMeshId, SkinnedShaderId, Transform,
-    instancing::{BatchKey, InstanceBatches},
+    instancing::{BatchKey, InstanceBatches, InstanceData},
     material::{MATERIAL_WGSL, MaterialShader},
+    params::ParamLayout,
     shader,
     subrenderer::{DrawData, FrameData, RenderContext, SubRenderer},
 };
 
-/// Matches `InstanceIn` in `prelude.wgsl`.
+/// Bind group of the joint matrices.
+const JOINTS_GROUP: u32 = 2;
+/// Bind group of the per-instance parameter segment (`instances`).
+const INSTANCE_PARAMS_GROUP: u32 = 3;
+
+/// Matches the fixed part of `InstanceIn` in `prelude.wgsl`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct InstanceRaw {
     model: [[f32; 4]; 4],
     color: [f32; 4],
-    params: [f32; 4],
     joint_offset: u32,
+    param_slot: u32,
+}
+
+impl InstanceData for InstanceRaw {
+    fn set_param_slot(&mut self, slot: u32) {
+        self.param_slot = slot;
+    }
 }
 
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
@@ -34,9 +46,9 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
 
 const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
     5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4, // model matrix columns
-    9 => Float32x4,  // color
-    10 => Float32x4, // params
-    11 => Uint32,    // joint_offset
+    9 => Float32x4, // color
+    10 => Uint32,   // joint_offset
+    11 => Uint32,   // param_slot
 ];
 
 fn vertex_buffers() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
@@ -57,6 +69,10 @@ fn vertex_buffers() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
 struct ShaderEntry {
     blend: BlendMode,
     pipeline: wgpu::RenderPipeline,
+    /// Its `struct Material`.
+    material_layout: Arc<ParamLayout>,
+    /// Its `struct Instance`.
+    instance_layout: ParamLayout,
 }
 
 struct MeshEntry {
@@ -142,9 +158,15 @@ impl SkinnedMeshRenderer {
     pub(crate) fn new(ctx: &RenderContext) -> Self {
         let device = &ctx.gpu.device;
         let joints = JointBuffer::new(device);
+        let instances = InstanceBatches::new(device, "skinned mesh instances");
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("skinned mesh pipeline layout"),
-            bind_group_layouts: &[Some(&ctx.globals_layout), Some(&ctx.material_layout), Some(&joints.layout)],
+            bind_group_layouts: &[
+                Some(&ctx.globals_layout),
+                Some(&ctx.material_layout),
+                Some(&joints.layout),
+                Some(instances.params_layout()),
+            ],
             immediate_size: 0,
         });
         Self {
@@ -153,7 +175,7 @@ impl SkinnedMeshRenderer {
             shaders: HashMap::new(),
             meshes: HashMap::new(),
             skeletons: HashMap::new(),
-            instances: InstanceBatches::new(device, "skinned mesh instances"),
+            instances,
             joints,
             prev_by_key: HashMap::new(),
             joint_matrices: Vec::new(),
@@ -164,8 +186,12 @@ impl SkinnedMeshRenderer {
 
     // ---- shaders ----
 
-    pub(crate) fn has_shader(&self, id: SkinnedShaderId) -> bool {
-        self.shaders.contains_key(&id)
+    pub(crate) fn material_layout(&self, id: SkinnedShaderId) -> Option<Arc<ParamLayout>> {
+        self.shaders.get(&id).map(|s| s.material_layout.clone())
+    }
+
+    pub(crate) fn instance_layout(&self, id: SkinnedShaderId) -> Option<&ParamLayout> {
+        self.shaders.get(&id).map(|s| &s.instance_layout)
     }
 
     pub(crate) fn create_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<SkinnedShaderId, RenderError> {
@@ -175,13 +201,20 @@ impl SkinnedMeshRenderer {
         Ok(id)
     }
 
-    pub(crate) fn update_shader(&mut self, id: SkinnedShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
-        if !self.has_shader(id) {
+    /// Recompile in place and return the (possibly changed) `struct
+    /// Material` layout. On error the old version stays.
+    pub(crate) fn update_shader(
+        &mut self,
+        id: SkinnedShaderId,
+        desc: &ShaderDesc<'_>,
+    ) -> Result<Arc<ParamLayout>, RenderError> {
+        if !self.shaders.contains_key(&id) {
             return Err(RenderError::UnknownSkinnedShader(id));
         }
         let entry = self.build_shader(desc)?;
+        let layout = entry.material_layout.clone();
         self.shaders.insert(id, entry);
-        Ok(())
+        Ok(layout)
     }
 
     pub(crate) fn destroy_shader(&mut self, id: SkinnedShaderId) {
@@ -189,14 +222,14 @@ impl SkinnedMeshRenderer {
     }
 
     fn build_shader(&self, desc: &ShaderDesc<'_>) -> Result<ShaderEntry, RenderError> {
-        let pipeline = shader::mesh_pipeline(
-            &self.ctx,
-            &self.pipeline_layout,
-            &[MATERIAL_WGSL, PRELUDE],
-            desc,
-            &vertex_buffers(),
-        )?;
-        Ok(ShaderEntry { blend: desc.blend, pipeline })
+        let source = shader::compose_mesh(&[MATERIAL_WGSL, PRELUDE], desc.source);
+        let pipeline = shader::mesh_pipeline(&self.ctx, &self.pipeline_layout, &source, desc, &vertex_buffers())?;
+        Ok(ShaderEntry {
+            blend: desc.blend,
+            pipeline,
+            material_layout: Arc::new(shader::reflect_params(desc.label, &source, 1)?),
+            instance_layout: shader::reflect_params(desc.label, &source, INSTANCE_PARAMS_GROUP)?,
+        })
     }
 
     // ---- meshes and skeletons ----
@@ -283,14 +316,15 @@ impl SubRenderer for SkinnedMeshRenderer {
             skeleton.skinning_matrices(pose, &mut self.model_space, &mut self.joint_matrices);
             debug_assert_eq!(self.joint_matrices.len(), joint_offset as usize + skeleton.joint_count());
 
-            let (transform, color, params) = match prev {
+            let (transform, color) = match prev {
                 Some(prev) => (
                     prev.transform.lerp(&curr.transform, frame.alpha),
                     prev.color.lerp(curr.color, frame.alpha),
-                    prev.params.lerp(curr.params, frame.alpha),
                 ),
-                None => (curr.transform, curr.color, curr.params),
+                None => (curr.transform, curr.color),
             };
+            let prev_values = prev.map_or(&[][..], |prev| frame.prev.instance_values(prev.params));
+            let curr_values = frame.curr.instance_values(curr.params);
 
             let key = BatchKey {
                 blended: shader.blend != BlendMode::Opaque,
@@ -298,15 +332,15 @@ impl SubRenderer for SkinnedMeshRenderer {
                 material: curr.material,
                 mesh: curr.mesh,
             };
-            self.instances.push(
-                key,
-                InstanceRaw {
-                    model: transform.to_matrix().to_cols_array_2d(),
-                    color: color.to_array(),
-                    params: params.to_array(),
-                    joint_offset,
-                },
-            );
+            let instance = InstanceRaw {
+                model: transform.to_matrix().to_cols_array_2d(),
+                color: color.to_array(),
+                joint_offset,
+                param_slot: 0, // assigned in upload
+            };
+            self.instances.push(key, instance, |out| {
+                shader.instance_layout.pack(prev_values, curr_values, frame.alpha, out);
+            });
         }
 
         self.instances.upload(&self.ctx.gpu);
@@ -319,8 +353,8 @@ impl SubRenderer for SkinnedMeshRenderer {
             return;
         }
         pass.set_bind_group(0, data.globals, &[]);
-        pass.set_bind_group(2, &self.joints.bind_group, &[]);
-        pass.set_vertex_buffer(1, self.instances.buffer().slice(..));
+        pass.set_bind_group(JOINTS_GROUP, &self.joints.bind_group, &[]);
+        pass.set_vertex_buffer(1, self.instances.instance_buffer().slice(..));
 
         let mut current: Option<BatchKey<SkinnedShaderId, SkinnedMeshId>> = None;
         for batch in batches {
@@ -330,6 +364,7 @@ impl SubRenderer for SkinnedMeshRenderer {
 
             if current.is_none_or(|c| c.shader != key.shader) {
                 pass.set_pipeline(&self.shaders[&key.shader].pipeline);
+                pass.set_bind_group(INSTANCE_PARAMS_GROUP, self.instances.segment(batch.segment), &[]);
             }
             if current.is_none_or(|c| c.material != key.material) {
                 let material = data.materials.get(key.material).expect("checked in prepare");

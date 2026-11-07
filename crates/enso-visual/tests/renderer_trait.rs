@@ -2,7 +2,8 @@
 //! builds scenes can be written once against the trait and tested anywhere.
 
 use enso_visual::{
-    MaterialDesc, MaterialId, MeshId, MeshShaderId, RenderError, RenderWorld, Renderer, ShaderDesc, SkeletonId,
+    MaterialDesc, MaterialId, MeshId, MeshShaderId, ParamInfo, RenderError, RenderWorld, Renderer, ShaderDesc,
+    SkeletonId,
     SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextureDesc, TextureId, Transform,
     skinned_mesh::{SkeletonDesc, SkinnedMeshData},
     sky::SkyShaderDesc,
@@ -71,6 +72,14 @@ impl Renderer for Recording {
         Ok(id)
     }
     fn destroy_material(&mut self, _: MaterialId) {}
+
+    // No shaders are compiled, so there are no parameter structs.
+    fn material_params(&self, _: MaterialId) -> Option<&[ParamInfo]> {
+        None
+    }
+    fn instance_params(&self, _: MaterialId) -> Option<&[ParamInfo]> {
+        None
+    }
 
     fn create_sky_shader(&mut self, _: &SkyShaderDesc<'_>) -> Result<SkyShaderId, RenderError> {
         Ok(SkyShaderId::next())

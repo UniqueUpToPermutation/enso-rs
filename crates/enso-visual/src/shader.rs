@@ -12,7 +12,11 @@
 //! Compilation errors are *returned*, not panicked on, so a typo in a shader
 //! during a live set leaves the previous shader running instead of crashing.
 
-use crate::{RenderError, subrenderer::RenderContext};
+use crate::{
+    RenderError,
+    params::{ParamLayout, declares_struct},
+    subrenderer::RenderContext,
+};
 
 /// Frame-wide uniforms, bound at `@group(0)` for every subrenderer.
 /// Must match `GlobalsUniform` in `renderer.rs` byte for byte.
@@ -78,6 +82,30 @@ pub(crate) fn compose(parts: &[&str], user_source: &str) -> String {
     out
 }
 
+/// [`compose`], plus empty `Material` / `Instance` structs for whichever the
+/// user's shader doesn't declare (mesh-like preludes refer to both).
+pub(crate) fn compose_mesh(parts: &[&str], user_source: &str) -> String {
+    compose_with_structs(parts, user_source, &["Material", "Instance"])
+}
+
+/// [`compose`], plus an empty placeholder for each struct in `structs` the
+/// user's shader doesn't declare.
+pub(crate) fn compose_with_structs(parts: &[&str], user_source: &str, structs: &[&str]) -> String {
+    let mut out = compose(parts, user_source);
+    for &name in structs {
+        if !declares_struct(user_source, name) {
+            out.push_str(&format!("\n// (no `struct {name}` declared: empty placeholder)\nstruct {name} {{ _unused: vec4<f32> }};\n"));
+        }
+    }
+    out
+}
+
+/// Read the parameter struct bound at `@group(group) @binding(0)` from a
+/// composed shader source.
+pub(crate) fn reflect_params(label: &str, source: &str, group: u32) -> Result<ParamLayout, RenderError> {
+    ParamLayout::reflect(source, group, 0).map_err(|message| RenderError::ShaderParams { label: label.to_owned(), message })
+}
+
 /// Run `build` while capturing wgpu validation errors, returning them as a
 /// [`RenderError::ShaderCompile`] instead of letting wgpu's default handler
 /// panic. Use around `create_shader_module` + `create_render_pipeline`.
@@ -97,17 +125,17 @@ pub(crate) fn capture_errors<T>(
     }
 }
 
-/// Build the pipeline for a mesh-like shader: user `vs_main`/`fs_main`,
-/// triangle list, depth test, blending per [`BlendMode`].
+/// Build the pipeline for a mesh-like shader from its composed `source`:
+/// user `vs_main`/`fs_main`, triangle list, depth test, blending per
+/// [`BlendMode`].
 pub(crate) fn mesh_pipeline(
     ctx: &RenderContext,
     layout: &wgpu::PipelineLayout,
-    parts: &[&str],
+    source: &str,
     desc: &ShaderDesc<'_>,
     vertex_buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
 ) -> Result<wgpu::RenderPipeline, RenderError> {
     let device = &ctx.gpu.device;
-    let source = compose(parts, desc.source);
 
     let blend = match desc.blend {
         BlendMode::Opaque => wgpu::BlendState::REPLACE,

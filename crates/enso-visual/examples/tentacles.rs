@@ -11,11 +11,9 @@ mod common;
 
 use common::{Example, Setup, hue};
 use enso_visual::{
-    BlendMode, Camera, MaterialDesc, MaterialId, RenderWorld, Renderer, SkeletonId, SkinnedMeshId, SkyShaderId,
-    Transform,
+    BlendMode, Camera, MaterialDesc, MaterialId, RenderWorld, Renderer, SkeletonId, SkinnedMeshId, Transform,
     glam::{Quat, Vec3, Vec4},
     skinned_mesh::{SkeletonDesc, SkinnedDraw, SkinnedMeshData},
-    sky::Sky,
 };
 
 fn main() {
@@ -32,7 +30,8 @@ struct Tentacles {
     /// Kept for its rest pose, which every tick's pose starts from.
     skeleton_desc: SkeletonDesc,
     material: MaterialId,
-    sky: SkyShaderId,
+    /// A material of sky.wgsl.
+    sky: MaterialId,
     /// Reused each tick to build a pose without allocating.
     pose: Vec<Transform>,
 }
@@ -42,9 +41,18 @@ impl Example for Tentacles {
 
     fn init(setup: &mut Setup<'_>) -> Self {
         let shader = setup.skinned_shader("skinned_lit.wgsl", BlendMode::Opaque);
-        let sky = setup.sky_shader("sky.wgsl");
+        let sky_shader = setup.sky_shader("sky.wgsl");
 
         let renderer = &mut *setup.renderer;
+        // A fixed sky: every knob is a default, nothing is set per tick.
+        let sky = renderer
+            .create_material(
+                &MaterialDesc::new(sky_shader)
+                    .with_param("sun_dir", Vec3::new(0.3, 0.35, -1.0).normalize())
+                    .with_param("horizon", Vec3::new(0.30, 0.45, 0.55))
+                    .with_param("zenith", Vec3::new(0.04, 0.08, 0.20)),
+            )
+            .unwrap();
         let skeleton_desc = SkeletonDesc::chain(JOINTS, LENGTH);
         Self {
             mesh: renderer.create_skinned_mesh(&SkinnedMeshData::tube(0.18, LENGTH, 16, 40, JOINTS)),
@@ -64,12 +72,7 @@ impl Example for Tentacles {
             target: Vec3::new(0.0, 1.4, 0.0),
             ..Default::default()
         };
-        world.sky = Some(Sky::new(self.sky).with_params([
-            Vec3::new(0.3, 0.35, -1.0).normalize().extend(0.0), // sun
-            Vec4::new(0.30, 0.45, 0.55, 1.0),                    // horizon
-            Vec4::new(0.04, 0.08, 0.20, 1.0),                    // zenith
-            Vec4::ZERO,
-        ]));
+        world.sky = Some(self.sky);
 
         for k in 0..COUNT {
             let f = k as f32 / COUNT as f32;

@@ -81,6 +81,27 @@ can be written against `impl Renderer` and tested without a GPU. Next
 step when `enso-core` exists: move the trait, `RenderWorld`, IDs and
 descriptors there (needs an own texture-format enum first).
 
+**2026-11-07: Named, typed shader parameters via naga reflection.**
+(Owner asked to implement the proposal.) Shaders declare `struct Material`
+and `struct Instance`; their layouts are reflected at compile time, and
+values are set by name (`Param<T>`) per tick and interpolated. This replaced
+the anonymous `[Vec4; 4]` material knobs and `MeshDraw::params: Vec4`.
+Instance data for different shaders has different strides, so it goes in
+one storage buffer per frame, *segmented per shader* (aligned offsets, a
+bind group per segment, `param_slot` per instance). Values are **per
+tick** (owner didn't choose; matches `RenderWorld` and interpolation). A
+persistent layer, e.g. for MIDI controller state, can live above the
+renderer. Unset fields fall back to defaults.
+
+**2026-11-07: The sky uses materials; its vertex stage is fixed and outputs
+the view direction.** (Owner's request.) `MaterialShader::Sky`;
+`world.sky: Option<MaterialId>`; sky shaders get `struct Material` knobs
+and texture slots (panoramas). The prelude's `sky_vs_main` outputs an
+*unnormalised* `view_dir` per vertex (exact under interpolation; normalise
+in the fragment shader), replacing the per-pixel `sky_view_dir()`. This
+replaced `Sky`/`SkyParams`/`with_params`. The sky and tentacles goldens were
+unchanged within tolerance.
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.
@@ -88,3 +109,8 @@ descriptors there (needs an own texture-format enum first).
 - Map shader error line numbers back to the user's file.
 - Move `RenderWorld` + ID types into `enso-core`.
 - Render-to-texture / full-screen effect subrenderer (feedback trails).
+- Scene level: `world.scene` (ambient, fog), keyed lights in a storage
+  buffer, optional `lighting.wgsl` helpers; a `struct Scene` for global knobs.
+- `// @range(a, b) @default(x)` comment annotations on parameter fields for
+  GUI sliders and defaults.
+- egui control panel generated from `material_params` / `instance_params`.

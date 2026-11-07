@@ -17,14 +17,16 @@ use glam::Vec4;
 pub use geometry::{MeshData, Vertex};
 pub(crate) use renderer::StaticMeshRenderer;
 
-use crate::{MaterialId, MeshId, Transform};
+use crate::{MaterialId, MeshId, Transform, world::Span};
 
 /// The WGSL contract prepended to every static mesh shader (after the
 /// globals and material declarations).
 pub const PRELUDE: &str = include_str!("prelude.wgsl");
 
 /// One instance of a mesh in a [`RenderWorld`](crate::RenderWorld).
-/// Its fields reach the shader as `InstanceIn` (see [`PRELUDE`]).
+/// Its fields reach the shader as `InstanceIn` (see [`PRELUDE`]); its
+/// shader's `struct Instance` values are set with
+/// [`RenderWorld::draw_mesh`](crate::RenderWorld::draw_mesh)`(..).with(..)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeshDraw {
     /// Stable identity across ticks (e.g. an ECS entity id). Draws with the
@@ -37,8 +39,8 @@ pub struct MeshDraw {
     pub material: MaterialId,
     pub transform: Transform,
     pub color: Vec4,
-    /// Free per-instance knobs, e.g. note velocity or age.
-    pub params: Vec4,
+    /// This draw's `struct Instance` values in the world's packed array.
+    pub(crate) params: Span,
 }
 
 impl MeshDraw {
@@ -49,7 +51,7 @@ impl MeshDraw {
             material,
             transform: transform.into(),
             color: Vec4::ONE,
-            params: Vec4::ZERO,
+            params: Span::default(),
         }
     }
     pub fn with_key(mut self, key: u64) -> Self {
@@ -60,18 +62,14 @@ impl MeshDraw {
         self.color = color;
         self
     }
-    pub fn with_params(mut self, params: Vec4) -> Self {
-        self.params = params;
-        self
-    }
 
     /// Blend the continuous properties of `prev` towards `curr`. Discrete
-    /// ones (mesh, material) come from `curr`.
+    /// ones (mesh, material) come from `curr`; parameter values are
+    /// interpolated separately, by name.
     pub(crate) fn interpolate(prev: &Self, curr: &Self, t: f32) -> Self {
         Self {
             transform: prev.transform.lerp(&curr.transform, t),
             color: prev.color.lerp(curr.color, t),
-            params: prev.params.lerp(curr.params, t),
             ..*curr
         }
     }
