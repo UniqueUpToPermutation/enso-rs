@@ -28,10 +28,13 @@ available.
 
 ## Shell quirks
 
-- PowerShell: piping a here-string into `git commit -F -` does **not**
-  work. Use the Bash tool with a heredoc for multi-line commit messages.
-- Avoid `cd … &&` prefixes; the working directory is already the repo root,
-  and compound commands trigger extra permission prompts.
+- Multi-line commit messages: write the message to a file in the scratchpad
+  directory with the Write tool, then run `git commit -F <that file>`.
+  PowerShell here-string piping into `-F -` does **not** work, and Bash
+  heredocs trigger permission prompts even though `Bash(git:*)` is allowed.
+- Run one command per tool call. Chaining with `&&` / `;`, `cd …` prefixes
+  and heredocs can't be matched against simple allow rules, so they
+  trigger permission prompts.
 - Permission allow rules are per tool: `Bash(git:*)` doesn't cover the
   PowerShell tool.
 
