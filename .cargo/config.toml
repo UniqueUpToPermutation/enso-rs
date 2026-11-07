@@ -1,0 +1,4 @@
+# Cargo aliases. `cargo xtask <args>` runs the workspace's xtask binary
+# (project automation written in Rust instead of shell scripts).
+[alias]
+xtask = "run --quiet --package xtask --"

@@ -15,4 +15,12 @@ wgpu.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
+image.workspace = true
 winit.workspace = true
+
+# Every example is also built as a test (`test = true`), so `cargo test` runs
+# the golden-image check inside it. tests/examples_have_golden_tests.rs
+# fails if an example is missing from this list.
+[[example]]
+name = "static_mesh"
+test = true

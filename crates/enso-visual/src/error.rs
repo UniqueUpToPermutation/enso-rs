@@ -17,4 +17,7 @@ pub enum RenderError {
 
     #[error("texture data is {got} bytes, expected {expected}")]
     TextureDataSize { expected: usize, got: usize },
+
+    #[error("failed to read pixels back from the GPU: {0}")]
+    Readback(String),
 }

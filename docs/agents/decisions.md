@@ -39,6 +39,13 @@ at a fixed tick; rendering interpolates. Consequences:
 request.) Each task gets a `<type>/<short-topic>` branch; the owner reviews
 and merges.
 
+**2026-11-07: Every example is a headless golden-image test.** (Owner's
+request.) Examples are built as tests with `[[example]] test = true`, so
+the scene code isn't duplicated. Goldens live next to the examples, and
+`cargo xtask golden` reviews and accepts them. Tolerance: >3/255 per channel
+on >0.1% of pixels fails. Rendering at `alpha = 0.5` also exercises
+interpolation.
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.

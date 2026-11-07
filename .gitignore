@@ -1,1 +1,5 @@
 /target
+
+# Golden-image test output (review with `cargo xtask golden`)
+*.actual.png
+*.diff.png

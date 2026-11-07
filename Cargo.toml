@@ -3,7 +3,7 @@
 # of dependency versions.
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "xtask"]
 
 # Metadata that member crates inherit with `edition.workspace = true`, etc.
 [workspace.package]
@@ -24,6 +24,8 @@ pollster = "1.0"
 thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
+# PNG only: the full default feature set compiles a dozen codecs.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Optimise dependencies even in debug builds: wgpu, naga and (later) the DSP
 # code are painfully slow unoptimised, while our own crates stay fast to build.

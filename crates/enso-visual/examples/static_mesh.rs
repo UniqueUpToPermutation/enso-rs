@@ -94,3 +94,13 @@ impl Example for StaticMesh {
         world.draw_mesh(MeshDraw::new(self.sphere, self.blob_material, Transform::IDENTITY).with_key(SPHERE_KEY));
     }
 }
+
+/// `cargo test` renders this example headless and compares it with
+/// `examples/golden/static_mesh.png` (see `common::assert_golden`).
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn matches_golden_image() {
+        crate::common::assert_golden::<crate::StaticMesh>();
+    }
+}

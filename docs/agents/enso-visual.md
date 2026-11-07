@@ -34,22 +34,66 @@ renderer.render(RenderTarget, &prev, &curr, alpha)
 | `src/static_mesh/renderer.rs` | Private `StaticMeshRenderer`: resource maps, interpolation, sort/batch, draw |
 | `src/static_mesh/prelude.wgsl` | Shader contract: `VertexIn` (loc 0-2), `InstanceIn` (loc 3-8), group 1 material |
 | `src/static_mesh/geometry.rs` | `Vertex`, `MeshData::{quad, cube, uv_sphere}` + winding tests |
-| `examples/common/mod.rs` | Shared example harness (see below) |
-| `examples/static_mesh.rs` | Cubes + wobbling sphere at a 20 Hz sim; only scene code |
+| `src/offscreen.rs` | `OffscreenTarget`: render into a texture, `read_pixels` back to the CPU |
+| `examples/common/mod.rs` | Example harness: `Example` trait, `Setup`, `Simulation`, shader hot reload, helpers |
+| `examples/common/window.rs` | Interactive winit window + real-time loop (`common::run`) |
+| `examples/common/golden.rs` | Headless golden-image test (`common::assert_golden`, test builds only) |
+| `examples/golden/*.png` | Committed golden images, one per example |
+| `examples/static_mesh.rs` | Cubes + wobbling sphere at a 20 Hz sim; only scene code + its test |
+| `tests/examples_have_golden_tests.rs` | Guard: every example is registered as a golden test |
 
 ## Example harness
 
-`examples/common/mod.rs` is included by each example with `mod common;`.
+`examples/common/` is included by each example with `mod common;`.
 Cargo doesn't build it as an example because it is neither `examples/*.rs`
 nor `examples/*/main.rs`. It owns logging, the winit window/surface, the
-fixed-timestep loop (`prev.clone_from(&curr); curr.clear(); simulate`),
-interpolation toggle (Space), quit (Esc), and shader hot reload.
+fixed-timestep loop (`Simulation`: `prev.clone_from(&curr); curr.clear();
+simulate`), interpolation toggle (Space), quit (Esc), and shader hot reload.
 
-A new example implements `common::Example` (`TITLE`, optional `TICK_HZ`,
-`init(&mut Setup)`, `simulate(time, &mut RenderWorld)`) and calls
-`common::run::<MyExample>()` from `main`. Load shaders with
-`setup.mesh_shader("file.wgsl", blend)` (files in `examples/shaders/`) to get
-hot reload for free. Helpers: `checkerboard`, `hue`.
+## Adding an example
+
+1. `examples/<name>.rs`: implement `common::Example` (`TITLE`, optional
+   `TICK_HZ` and `GOLDEN_TIME`, `init(&mut Setup)`, `simulate(time, &mut
+   RenderWorld)`), and call `common::run::<MyExample>()` from `main`. Load
+   shaders with `setup.mesh_shader("file.wgsl", blend)` (from
+   `examples/shaders/`) to get hot reload. Helpers: `checkerboard`, `hue`.
+2. At the end of the file:
+   ```rust
+   #[cfg(test)]
+   mod tests {
+       #[test]
+       fn matches_golden_image() {
+           crate::common::assert_golden::<crate::MyExample>();
+       }
+   }
+   ```
+3. In `crates/enso-visual/Cargo.toml`: `[[example]] name = "<name>" test = true`.
+   This makes `cargo test` build the example as a test binary too.
+4. `cargo test -p enso-visual` fails ("no golden image yet") and writes
+   `examples/golden/<name>.actual.png`. **Look at it** (agents: read the PNG),
+   then `cargo xtask golden accept <name>` and commit the `.png`.
+
+## Golden-image tests
+
+* `assert_golden` initialises the example exactly as the window does,
+  steps the simulation `round(GOLDEN_TIME * TICK_HZ)` ticks (time =
+  `ticks / TICK_HZ`, exact), renders 640x360 at `alpha = 0.5` into an
+  `Rgba8UnormSrgb` `OffscreenTarget`, and compares with
+  `examples/golden/<name>.png`.
+* Tolerance: a pixel differs if any channel is off by more than 3; the
+  test fails if more than 0.1% of pixels differ. Constants are at the top
+  of `golden.rs`. Goldens were made on an RTX 5080 / Vulkan; another GPU
+  may need a looser tolerance or its own goldens.
+* On failure it writes `<name>.actual.png` and `<name>.diff.png` (red =
+  differs over a dimmed golden; gitignored) and panics with stats. Stale
+  outputs are deleted at the start of each run.
+* Needs a GPU adapter; there is no skip if none is found.
+* Review: `cargo xtask golden` writes `target/golden-report.html` (expected
+  / actual / diff / hover-to-compare), opens it, and asks `[y/N/q]` per
+  failure when run in a terminal. Non-interactive:
+  `cargo xtask golden accept <name>|--all`, `cargo xtask golden clean`.
+* `xtask/` is a workspace binary crate; `.cargo/config.toml` defines the
+  `cargo xtask` alias. It has no dependencies.
 
 ## Shader composition
 

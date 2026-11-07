@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+description = "Project automation for enso. Run as `cargo xtask <command>`."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

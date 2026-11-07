@@ -8,9 +8,13 @@ available.
 
 ## Verifying a change
 
-1. `cargo clippy -p <crate> --all-targets`: no warnings.
-2. `cargo test -p <crate>`.
-3. For renderer changes, launch the example for a few seconds and check
+1. `cargo clippy --workspace --all-targets`: no warnings.
+2. `cargo test --workspace`. This includes the golden-image tests. If a
+   change is *meant* to alter the picture, read the `.actual.png` and
+   `.diff.png` to confirm the change is what you intended, then accept
+   with `cargo xtask golden accept <name>` and say so in your report. If it
+   wasn't meant to, it's a regression: fix it.
+3. For renderer changes, also launch the example for a few seconds and check
    stderr for wgpu validation errors or panics (PowerShell):
 
    ```powershell

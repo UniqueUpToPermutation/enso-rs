@@ -20,7 +20,8 @@ behind Rust/Cargo choices briefly when you make them.
 ```sh
 cargo check                                         # fast type-check, use constantly
 cargo clippy --all-targets                          # keep it warning-free
-cargo test -p enso-visual                           # unit tests (geometry winding, transform lerp)
+cargo test -p enso-visual                           # unit tests + headless golden-image test per example
+cargo xtask golden                                  # review golden-image failures, accept new images
 cargo run -p enso-visual --example static_mesh      # windowed demo; Space toggles interpolation
 cargo doc -p enso-visual --no-deps --open           # browse the public API
 ```
@@ -38,6 +39,9 @@ cargo doc -p enso-visual --no-deps --open           # browse the public API
 - **`RenderWorld` must stay plain data:** IDs, numbers, glam types. No wgpu
   handles, no `Arc`s to GPU objects. It is meant to be built on the
   simulation thread and may move to `enso-core`.
+- **Every example is a golden-image test** (`test = true` in the crate's
+  `Cargo.toml` + a `#[test]` calling `common::assert_golden`). A guard test
+  fails if one is missing. Never accept a golden image you haven't looked at.
 - **Nothing on the live path may panic on user input.** Shader compile
   errors return `RenderError`; missing resources are skipped silently.
 - **The audio thread (future) must never allocate, lock, or block.**
