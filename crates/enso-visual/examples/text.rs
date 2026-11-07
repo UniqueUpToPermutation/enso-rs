@@ -81,7 +81,7 @@ impl Example for TextExample {
         };
 
         world.draw_text(
-            TextDraw::new(self.font, self.title, Vec3::new(0.0, 0.6, 0.0))
+            TextDraw::new(self.font, self.title, Vec3::new(0.0, 1.0, 0.0))
                 .with_key(0)
                 .with_size(1.6)
                 .with_align(TextAlign::Center)
@@ -89,7 +89,7 @@ impl Example for TextExample {
             "enso",
         );
         world.draw_text(
-            TextDraw::new(self.font, self.small, Vec3::new(0.0, -0.1, 0.0))
+            TextDraw::new(self.font, self.small, Vec3::new(0.0, 0.5, 0.0))
                 .with_key(1)
                 .with_size(0.32)
                 .with_align(TextAlign::Center)
