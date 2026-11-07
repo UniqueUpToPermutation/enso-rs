@@ -1,4 +1,4 @@
-use crate::ids::{MeshShaderId, SkyShaderId, TextureId};
+use crate::ids::{MeshShaderId, SkinnedShaderId, SkyShaderId, TextureId};
 
 /// Everything that can go wrong when creating or updating render resources.
 #[derive(Debug, thiserror::Error)]
@@ -12,6 +12,9 @@ pub enum RenderError {
     #[error("unknown mesh shader {0:?} (never created, or destroyed)")]
     UnknownShader(MeshShaderId),
 
+    #[error("unknown skinned shader {0:?} (never created, or destroyed)")]
+    UnknownSkinnedShader(SkinnedShaderId),
+
     #[error("unknown sky shader {0:?} (never created, or destroyed)")]
     UnknownSkyShader(SkyShaderId),
 
@@ -20,6 +23,9 @@ pub enum RenderError {
 
     #[error("texture data is {got} bytes, expected {expected}")]
     TextureDataSize { expected: usize, got: usize },
+
+    #[error("invalid skeleton: {0}")]
+    InvalidSkeleton(String),
 
     #[error("failed to read pixels back from the GPU: {0}")]
     Readback(String),

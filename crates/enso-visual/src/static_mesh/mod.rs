@@ -4,6 +4,8 @@
 //! This module holds the *public contract* of the static mesh subrenderer:
 //! the data you create resources from and put into a
 //! [`RenderWorld`](crate::RenderWorld). The subrenderer itself is private.
+//! Shaders ([`ShaderDesc`](crate::ShaderDesc)) and materials
+//! ([`MaterialDesc`](crate::MaterialDesc)) are shared with skinned meshes.
 //!
 //! The shader side of the contract is [`PRELUDE`] (`prelude.wgsl`).
 
@@ -15,75 +17,11 @@ use glam::Vec4;
 pub use geometry::{MeshData, Vertex};
 pub(crate) use renderer::StaticMeshRenderer;
 
-use crate::{MaterialId, MeshId, MeshShaderId, TextureId, Transform, world::MaterialParams};
+use crate::{MaterialId, MeshId, Transform};
 
-/// The WGSL contract prepended to every static mesh shader.
+/// The WGSL contract prepended to every static mesh shader (after the
+/// globals and material declarations).
 pub const PRELUDE: &str = include_str!("prelude.wgsl");
-
-/// Number of texture slots in a material (`texture0`..`texture3`).
-pub const MAX_TEXTURES: usize = 4;
-
-/// How a shader's output combines with what is already on screen.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum BlendMode {
-    /// Overwrites; writes depth. Drawn first.
-    #[default]
-    Opaque,
-    /// Standard transparency using output alpha. No depth write.
-    Alpha,
-    /// Adds light: glows, particles, trails. No depth write.
-    Additive,
-}
-
-/// Everything needed to build a static mesh shader.
-#[derive(Debug, Clone)]
-pub struct ShaderDesc<'a> {
-    pub label: &'a str,
-    /// Your WGSL: must define `vs_main` and `fs_main` (see [`PRELUDE`]).
-    pub source: &'a str,
-    pub blend: BlendMode,
-    /// Draw back faces too (disables culling).
-    pub double_sided: bool,
-}
-
-impl<'a> ShaderDesc<'a> {
-    pub fn new(label: &'a str, source: &'a str) -> Self {
-        Self { label, source, blend: BlendMode::Opaque, double_sided: false }
-    }
-    pub fn blend(mut self, blend: BlendMode) -> Self {
-        self.blend = blend;
-        self
-    }
-    pub fn double_sided(mut self, yes: bool) -> Self {
-        self.double_sided = yes;
-        self
-    }
-}
-
-/// A shader plus its inputs: up to [`MAX_TEXTURES`] textures and default
-/// values for its four knobs.
-#[derive(Debug, Clone)]
-pub struct MaterialDesc<'a> {
-    pub shader: MeshShaderId,
-    /// Bound to `texture0`.. in order; missing slots are 1x1 white.
-    pub textures: &'a [TextureId],
-    /// Used whenever a `RenderWorld` does not set this material's params.
-    pub params: MaterialParams,
-}
-
-impl<'a> MaterialDesc<'a> {
-    pub fn new(shader: MeshShaderId) -> Self {
-        Self { shader, textures: &[], params: [Vec4::ZERO; 4] }
-    }
-    pub fn with_textures(mut self, textures: &'a [TextureId]) -> Self {
-        self.textures = textures;
-        self
-    }
-    pub fn with_params(mut self, params: MaterialParams) -> Self {
-        self.params = params;
-        self
-    }
-}
 
 /// One instance of a mesh in a [`RenderWorld`](crate::RenderWorld).
 /// Its fields reach the shader as `InstanceIn` (see [`PRELUDE`]).
@@ -95,6 +33,7 @@ pub struct MeshDraw {
     /// Keys should be unique within one world.
     pub key: Option<u64>,
     pub mesh: MeshId,
+    /// Must use a mesh shader ([`MeshShaderId`](crate::MeshShaderId)).
     pub material: MaterialId,
     pub transform: Transform,
     pub color: Vec4,

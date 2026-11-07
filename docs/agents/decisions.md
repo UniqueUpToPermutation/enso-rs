@@ -55,6 +55,22 @@ meshes. The sky persists across `clear()` like the camera.
 `ShaderId` was renamed `MeshShaderId` next to `SkyShaderId` so mixing them
 up is a type error.
 
+**2026-11-07: Skinned mesh subrenderer; the renderer owns skeletons and
+interpolates local joint poses.** (Owner asked for a skinned mesh
+renderer; pose ownership was the agent's call.) `RenderWorld` carries
+*local* joint transforms per draw, packed in one `poses` buffer. The renderer
+lerps/slerps them per joint, walks the hierarchy, and applies inverse binds
+derived from the rest pose. Interpolating final matrices instead would
+shear and shrink the mesh. Joint matrices for all instances go in one
+storage buffer (group 2) indexed by a per-instance `joint_offset`.
+
+**2026-11-07: Materials, `ShaderDesc`, `BlendMode` and instance batching
+are shared at crate level.** Static and skinned meshes use the same
+group-1 material layout, so one `MaterialStore` serves both;
+`MaterialShader::{Mesh, Skinned}` records which subrenderer a material
+belongs to. These types moved from `static_mesh::` to the crate root, a
+breaking path change for users. Existing goldens were verified unchanged.
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.

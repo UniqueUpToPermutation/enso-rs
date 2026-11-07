@@ -5,7 +5,12 @@ use std::collections::HashMap;
 
 use glam::Vec4;
 
-use crate::{Camera, MaterialId, sky::Sky, static_mesh::MeshDraw};
+use crate::{
+    Camera, MaterialId, Transform,
+    skinned_mesh::{PoseRange, SkinnedDraw},
+    sky::Sky,
+    static_mesh::MeshDraw,
+};
 
 /// The four `vec4` knobs of a material (`material.params[0..4]` in WGSL).
 pub type MaterialParams = [Vec4; 4];
@@ -43,9 +48,14 @@ pub struct RenderWorld {
     pub sky: Option<Sky>,
     /// Static mesh instances.
     pub meshes: Vec<MeshDraw>,
+    /// Skinned mesh instances. Add with [`draw_skinned`](Self::draw_skinned).
+    pub skinned: Vec<SkinnedDraw>,
     /// Per-tick material knob values. Materials not listed fall back to the
     /// params they were created with.
     pub material_params: HashMap<MaterialId, MaterialParams>,
+    /// Joint transforms of every skinned draw, packed one after another so
+    /// a tick's poses don't need an allocation each.
+    poses: Vec<Transform>,
 }
 
 impl Default for RenderWorld {
@@ -56,7 +66,9 @@ impl Default for RenderWorld {
             clear_color: Vec4::new(0.0, 0.0, 0.0, 1.0),
             sky: None,
             meshes: Vec::new(),
+            skinned: Vec::new(),
             material_params: HashMap::new(),
+            poses: Vec::new(),
         }
     }
 }
@@ -70,11 +82,30 @@ impl RenderWorld {
     /// Time, camera, clear colour and sky are left as they are.
     pub fn clear(&mut self) {
         self.meshes.clear();
+        self.skinned.clear();
         self.material_params.clear();
+        self.poses.clear();
     }
 
     pub fn draw_mesh(&mut self, draw: MeshDraw) {
         self.meshes.push(draw);
+    }
+
+    /// Draw a skinned mesh in `pose`: the *local* transform of each joint,
+    /// in skeleton order (start from the skeleton's
+    /// [`rest_pose`](crate::skinned_mesh::SkeletonDesc::rest_pose) and change
+    /// what moves). Missing trailing joints use the rest pose; an empty
+    /// pose draws the rest pose.
+    pub fn draw_skinned(&mut self, mut draw: SkinnedDraw, pose: &[Transform]) {
+        draw.pose = PoseRange { start: self.poses.len() as u32, len: pose.len() as u32 };
+        self.poses.extend_from_slice(pose);
+        self.skinned.push(draw);
+    }
+
+    /// The pose given with `draw` (which must belong to this world).
+    pub(crate) fn pose_of(&self, draw: &SkinnedDraw) -> &[Transform] {
+        let start = draw.pose.start as usize;
+        self.poses.get(start..start + draw.pose.len as usize).unwrap_or(&[])
     }
 
     pub fn set_material_params(&mut self, material: MaterialId, params: MaterialParams) {

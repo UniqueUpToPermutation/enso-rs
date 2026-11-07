@@ -1,6 +1,7 @@
 // ---- enso static mesh contract ----
 //
-// Prepended to every StaticMeshRenderer shader (after the globals).
+// Prepended to every static mesh shader (after the globals and the material
+// declarations: `material`, `material_sampler`, `texture0`..`texture3`).
 // Your shader must define:
 //
 //   @vertex   fn vs_main(v: VertexIn, i: InstanceIn) -> <your output struct>
@@ -15,7 +16,7 @@ struct VertexIn {
     @location(2) uv: vec2<f32>,
 };
 
-// Per-instance data from each `draw()` call (matches `MeshInstance` in Rust).
+// Per-instance data from each `MeshDraw` (matches `InstanceRaw` in Rust).
 struct InstanceIn {
     @location(3) model_0: vec4<f32>,
     @location(4) model_1: vec4<f32>,
@@ -28,15 +29,3 @@ struct InstanceIn {
 fn instance_model(i: InstanceIn) -> mat4x4<f32> {
     return mat4x4<f32>(i.model_0, i.model_1, i.model_2, i.model_3);
 }
-
-// Material (group 1): free knobs + up to four textures. Unused texture
-// slots are bound to 1x1 white.
-struct Material {
-    params: array<vec4<f32>, 4>,
-};
-@group(1) @binding(0) var<uniform> material: Material;
-@group(1) @binding(1) var material_sampler: sampler;
-@group(1) @binding(2) var texture0: texture_2d<f32>;
-@group(1) @binding(3) var texture1: texture_2d<f32>;
-@group(1) @binding(4) var texture2: texture_2d<f32>;
-@group(1) @binding(5) var texture3: texture_2d<f32>;

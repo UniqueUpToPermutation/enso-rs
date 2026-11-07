@@ -1,0 +1,347 @@
+//! The skinned mesh subrenderer (private implementation).
+
+use std::collections::HashMap;
+
+use glam::Mat4;
+use wgpu::util::DeviceExt;
+
+use super::{PRELUDE, SkeletonDesc, SkinnedMeshData, SkinnedVertex, skeleton::Skeleton};
+use crate::{
+    BlendMode, RenderError, ShaderDesc, SkeletonId, SkinnedMeshId, SkinnedShaderId, Transform,
+    instancing::{BatchKey, InstanceBatches},
+    material::{MATERIAL_WGSL, MaterialShader},
+    shader,
+    subrenderer::{DrawData, FrameData, RenderContext, SubRenderer},
+};
+
+/// Matches `InstanceIn` in `prelude.wgsl`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceRaw {
+    model: [[f32; 4]; 4],
+    color: [f32; 4],
+    params: [f32; 4],
+    joint_offset: u32,
+}
+
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+    0 => Float32x3, // position
+    1 => Float32x3, // normal
+    2 => Float32x2, // uv
+    3 => Uint16x4,  // joints (vec4<u32> in WGSL)
+    4 => Float32x4, // weights
+];
+
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+    5 => Float32x4, 6 => Float32x4, 7 => Float32x4, 8 => Float32x4, // model matrix columns
+    9 => Float32x4,  // color
+    10 => Float32x4, // params
+    11 => Uint32,    // joint_offset
+];
+
+fn vertex_buffers() -> [Option<wgpu::VertexBufferLayout<'static>>; 2] {
+    [
+        Some(wgpu::VertexBufferLayout {
+            array_stride: size_of::<SkinnedVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &VERTEX_ATTRIBUTES,
+        }),
+        Some(wgpu::VertexBufferLayout {
+            array_stride: size_of::<InstanceRaw>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &INSTANCE_ATTRIBUTES,
+        }),
+    ]
+}
+
+struct ShaderEntry {
+    blend: BlendMode,
+    pipeline: wgpu::RenderPipeline,
+}
+
+struct MeshEntry {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+/// All instances' skinning matrices for one frame, in a storage buffer.
+struct JointBuffer {
+    layout: wgpu::BindGroupLayout,
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    /// In matrices.
+    capacity: usize,
+}
+
+impl JointBuffer {
+    fn new(device: &wgpu::Device) -> Self {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("skinned joints layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(size_of::<Mat4>() as u64),
+                },
+                count: None,
+            }],
+        });
+        let capacity = 256;
+        let (buffer, bind_group) = Self::create(device, &layout, capacity);
+        Self { layout, buffer, bind_group, capacity }
+    }
+
+    fn create(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, capacity: usize) -> (wgpu::Buffer, wgpu::BindGroup) {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skinned joint matrices"),
+            size: (capacity * size_of::<Mat4>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("skinned joint matrices"),
+            layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
+        });
+        (buffer, bind_group)
+    }
+
+    fn upload(&mut self, gpu: &crate::Gpu, matrices: &[Mat4]) {
+        if matrices.is_empty() {
+            return;
+        }
+        if matrices.len() > self.capacity {
+            // The bind group points at the old buffer, so it is rebuilt too.
+            self.capacity = matrices.len().next_power_of_two();
+            (self.buffer, self.bind_group) = Self::create(&gpu.device, &self.layout, self.capacity);
+        }
+        gpu.queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(matrices));
+    }
+}
+
+pub(crate) struct SkinnedMeshRenderer {
+    ctx: RenderContext,
+    pipeline_layout: wgpu::PipelineLayout,
+    shaders: HashMap<SkinnedShaderId, ShaderEntry>,
+    meshes: HashMap<SkinnedMeshId, MeshEntry>,
+    skeletons: HashMap<SkeletonId, Skeleton>,
+    instances: InstanceBatches<SkinnedShaderId, SkinnedMeshId, InstanceRaw>,
+    joints: JointBuffer,
+
+    // Per-frame scratch space, kept to reuse allocations.
+    prev_by_key: HashMap<u64, usize>,
+    joint_matrices: Vec<Mat4>,
+    pose: Vec<Transform>,
+    model_space: Vec<Mat4>,
+}
+
+impl SkinnedMeshRenderer {
+    pub(crate) fn new(ctx: &RenderContext) -> Self {
+        let device = &ctx.gpu.device;
+        let joints = JointBuffer::new(device);
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("skinned mesh pipeline layout"),
+            bind_group_layouts: &[Some(&ctx.globals_layout), Some(&ctx.material_layout), Some(&joints.layout)],
+            immediate_size: 0,
+        });
+        Self {
+            ctx: ctx.clone(),
+            pipeline_layout,
+            shaders: HashMap::new(),
+            meshes: HashMap::new(),
+            skeletons: HashMap::new(),
+            instances: InstanceBatches::new(device, "skinned mesh instances"),
+            joints,
+            prev_by_key: HashMap::new(),
+            joint_matrices: Vec::new(),
+            pose: Vec::new(),
+            model_space: Vec::new(),
+        }
+    }
+
+    // ---- shaders ----
+
+    pub(crate) fn has_shader(&self, id: SkinnedShaderId) -> bool {
+        self.shaders.contains_key(&id)
+    }
+
+    pub(crate) fn create_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<SkinnedShaderId, RenderError> {
+        let entry = self.build_shader(desc)?;
+        let id = SkinnedShaderId::next();
+        self.shaders.insert(id, entry);
+        Ok(id)
+    }
+
+    pub(crate) fn update_shader(&mut self, id: SkinnedShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
+        if !self.has_shader(id) {
+            return Err(RenderError::UnknownSkinnedShader(id));
+        }
+        let entry = self.build_shader(desc)?;
+        self.shaders.insert(id, entry);
+        Ok(())
+    }
+
+    pub(crate) fn destroy_shader(&mut self, id: SkinnedShaderId) {
+        self.shaders.remove(&id);
+    }
+
+    fn build_shader(&self, desc: &ShaderDesc<'_>) -> Result<ShaderEntry, RenderError> {
+        let pipeline = shader::mesh_pipeline(
+            &self.ctx,
+            &self.pipeline_layout,
+            &[MATERIAL_WGSL, PRELUDE],
+            desc,
+            &vertex_buffers(),
+        )?;
+        Ok(ShaderEntry { blend: desc.blend, pipeline })
+    }
+
+    // ---- meshes and skeletons ----
+
+    pub(crate) fn create_mesh(&mut self, data: &SkinnedMeshData) -> SkinnedMeshId {
+        let device = &self.ctx.gpu.device;
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("skinned mesh vertices"),
+            contents: bytemuck::cast_slice(&data.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("skinned mesh indices"),
+            contents: bytemuck::cast_slice(&data.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let id = SkinnedMeshId::next();
+        self.meshes.insert(
+            id,
+            MeshEntry { vertex_buffer, index_buffer, index_count: data.indices.len() as u32 },
+        );
+        id
+    }
+
+    pub(crate) fn destroy_mesh(&mut self, id: SkinnedMeshId) {
+        self.meshes.remove(&id);
+    }
+
+    pub(crate) fn create_skeleton(&mut self, desc: &SkeletonDesc) -> Result<SkeletonId, RenderError> {
+        let skeleton = Skeleton::new(desc)?;
+        let id = SkeletonId::next();
+        self.skeletons.insert(id, skeleton);
+        Ok(id)
+    }
+
+    pub(crate) fn destroy_skeleton(&mut self, id: SkeletonId) {
+        self.skeletons.remove(&id);
+    }
+}
+
+impl SubRenderer for SkinnedMeshRenderer {
+    fn prepare(&mut self, frame: &FrameData<'_>, _encoder: &mut wgpu::CommandEncoder) {
+        self.prev_by_key.clear();
+        for (index, draw) in frame.prev.skinned.iter().enumerate() {
+            if let Some(key) = draw.key {
+                self.prev_by_key.insert(key, index);
+            }
+        }
+
+        self.instances.clear();
+        self.joint_matrices.clear();
+
+        for curr in &frame.curr.skinned {
+            // Missing resources (or a material for another subrenderer)
+            // just don't draw.
+            let Some(material) = frame.materials.get(curr.material) else { continue };
+            let MaterialShader::Skinned(shader_id) = material.shader else { continue };
+            let Some(shader) = self.shaders.get(&shader_id) else { continue };
+            let Some(skeleton) = self.skeletons.get(&curr.skeleton) else { continue };
+            if !self.meshes.contains_key(&curr.mesh) {
+                continue;
+            }
+
+            let prev = curr
+                .key
+                .and_then(|k| self.prev_by_key.get(&k))
+                .map(|&i| &frame.prev.skinned[i]);
+
+            // Interpolate the pose joint by joint when both ticks posed the
+            // same skeleton the same way; otherwise use this tick's pose.
+            let curr_pose = frame.curr.pose_of(curr);
+            let pose: &[Transform] = match prev {
+                Some(prev) if prev.skeleton == curr.skeleton && prev.pose.len == curr.pose.len => {
+                    let prev_pose = frame.prev.pose_of(prev);
+                    self.pose.clear();
+                    self.pose
+                        .extend(prev_pose.iter().zip(curr_pose).map(|(p, c)| p.lerp(c, frame.alpha)));
+                    &self.pose
+                }
+                _ => curr_pose,
+            };
+
+            let joint_offset = self.joint_matrices.len() as u32;
+            skeleton.skinning_matrices(pose, &mut self.model_space, &mut self.joint_matrices);
+            debug_assert_eq!(self.joint_matrices.len(), joint_offset as usize + skeleton.joint_count());
+
+            let (transform, color, params) = match prev {
+                Some(prev) => (
+                    prev.transform.lerp(&curr.transform, frame.alpha),
+                    prev.color.lerp(curr.color, frame.alpha),
+                    prev.params.lerp(curr.params, frame.alpha),
+                ),
+                None => (curr.transform, curr.color, curr.params),
+            };
+
+            let key = BatchKey {
+                blended: shader.blend != BlendMode::Opaque,
+                shader: shader_id,
+                material: curr.material,
+                mesh: curr.mesh,
+            };
+            self.instances.push(
+                key,
+                InstanceRaw {
+                    model: transform.to_matrix().to_cols_array_2d(),
+                    color: color.to_array(),
+                    params: params.to_array(),
+                    joint_offset,
+                },
+            );
+        }
+
+        self.instances.upload(&self.ctx.gpu);
+        self.joints.upload(&self.ctx.gpu, &self.joint_matrices);
+    }
+
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, data: &DrawData<'_>) {
+        let batches = self.instances.batches();
+        if batches.is_empty() {
+            return;
+        }
+        pass.set_bind_group(0, data.globals, &[]);
+        pass.set_bind_group(2, &self.joints.bind_group, &[]);
+        pass.set_vertex_buffer(1, self.instances.buffer().slice(..));
+
+        let mut current: Option<BatchKey<SkinnedShaderId, SkinnedMeshId>> = None;
+        for batch in batches {
+            let key = batch.key;
+            // Lookups can't fail: prepare filtered out missing resources.
+            let mesh = &self.meshes[&key.mesh];
+
+            if current.is_none_or(|c| c.shader != key.shader) {
+                pass.set_pipeline(&self.shaders[&key.shader].pipeline);
+            }
+            if current.is_none_or(|c| c.material != key.material) {
+                let material = data.materials.get(key.material).expect("checked in prepare");
+                pass.set_bind_group(1, &material.bind_group, &[]);
+            }
+            if current.is_none_or(|c| c.mesh != key.mesh) {
+                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            }
+            current = Some(key);
+
+            pass.draw_indexed(0..mesh.index_count, 0, batch.instances.clone());
+        }
+    }
+}

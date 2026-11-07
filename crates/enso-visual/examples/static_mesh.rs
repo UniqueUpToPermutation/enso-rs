@@ -10,9 +10,9 @@ mod common;
 
 use common::{Example, Setup, checkerboard, hue};
 use enso_visual::{
-    Camera, MaterialId, MeshId, RenderWorld, TextureDesc, Transform,
+    BlendMode, Camera, MaterialDesc, MaterialId, MeshId, RenderWorld, TextureDesc, Transform,
     glam::{EulerRot, Quat, Vec3, Vec4},
-    static_mesh::{BlendMode, MaterialDesc, MeshData, MeshDraw},
+    static_mesh::{MeshData, MeshDraw},
 };
 
 fn main() {

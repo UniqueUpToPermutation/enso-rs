@@ -23,10 +23,9 @@ use std::{
 };
 
 use enso_visual::{
-    MeshShaderId, RenderError, RenderWorld, Renderer, SkyShaderId,
+    BlendMode, MeshShaderId, RenderError, RenderWorld, Renderer, ShaderDesc, SkinnedShaderId, SkyShaderId,
     glam::Vec4,
     sky::SkyShaderDesc,
-    static_mesh::{BlendMode, ShaderDesc},
 };
 
 #[cfg(test)]
@@ -73,6 +72,18 @@ impl Setup<'_> {
             .create_mesh_shader(&ShaderDesc::new(file, &source).blend(blend))
             .unwrap_or_else(|err| panic!("initial shader must compile: {err}"));
         self.shaders.watch(file, ShaderKind::Mesh { id, blend });
+        id
+    }
+
+    /// Load `examples/shaders/<file>` as a skinned mesh shader, with the
+    /// same hot reload behaviour as [`mesh_shader`](Self::mesh_shader).
+    pub fn skinned_shader(&mut self, file: &str, blend: BlendMode) -> SkinnedShaderId {
+        let source = ShaderWatcher::read(file);
+        let id = self
+            .renderer
+            .create_skinned_shader(&ShaderDesc::new(file, &source).blend(blend))
+            .unwrap_or_else(|err| panic!("initial shader must compile: {err}"));
+        self.shaders.watch(file, ShaderKind::Skinned { id, blend });
         id
     }
 
@@ -139,6 +150,7 @@ struct WatchedShader {
 /// Which renderer entry point recompiles this shader.
 enum ShaderKind {
     Mesh { id: MeshShaderId, blend: BlendMode },
+    Skinned { id: SkinnedShaderId, blend: BlendMode },
     Sky { id: SkyShaderId },
 }
 
@@ -146,6 +158,9 @@ impl ShaderKind {
     fn update(&self, renderer: &mut Renderer, label: &str, source: &str) -> Result<(), RenderError> {
         match *self {
             Self::Mesh { id, blend } => renderer.update_mesh_shader(id, &ShaderDesc::new(label, source).blend(blend)),
+            Self::Skinned { id, blend } => {
+                renderer.update_skinned_shader(id, &ShaderDesc::new(label, source).blend(blend))
+            }
             Self::Sky { id } => renderer.update_sky_shader(id, &SkyShaderDesc::new(label, source)),
         }
     }

@@ -4,10 +4,13 @@ use bytemuck::Zeroable as _;
 use wgpu::util::DeviceExt;
 
 use crate::{
-    Gpu, MaterialId, MeshId, MeshShaderId, RenderError, RenderWorld, SkyShaderId, TextureId,
+    Gpu, MaterialId, MeshId, MeshShaderId, RenderError, RenderWorld, ShaderDesc, SkeletonId, SkinnedMeshId,
+    SkinnedShaderId, SkyShaderId, TextureId,
+    material::{MaterialDesc, MaterialShader, MaterialStore},
+    skinned_mesh::{SkeletonDesc, SkinnedMeshData, SkinnedMeshRenderer},
     sky::{SkyRenderer, SkyShaderDesc},
-    static_mesh::{MaterialDesc, MeshData, ShaderDesc, StaticMeshRenderer},
-    subrenderer::{FrameData, RenderContext, SubRenderer},
+    static_mesh::{MeshData, StaticMeshRenderer},
+    subrenderer::{DrawData, FrameData, RenderContext, SubRenderer},
     texture::{Texture, TextureDesc},
 };
 
@@ -51,10 +54,12 @@ pub struct Renderer {
     last_time: Option<f64>,
 
     textures: HashMap<TextureId, Texture>,
+    materials: MaterialStore,
 
     // Subrenderers, in draw order.
     sky: SkyRenderer,
     static_mesh: StaticMeshRenderer,
+    skinned_mesh: SkinnedMeshRenderer,
 }
 
 struct DepthTarget {
@@ -96,7 +101,9 @@ impl Renderer {
             }],
         });
 
+        let materials = MaterialStore::new(&gpu);
         let ctx = RenderContext {
+            material_layout: materials.layout().clone(),
             gpu,
             color_format,
             depth_format: DEPTH_FORMAT,
@@ -106,12 +113,14 @@ impl Renderer {
         Self {
             sky: SkyRenderer::new(&ctx),
             static_mesh: StaticMeshRenderer::new(&ctx),
+            skinned_mesh: SkinnedMeshRenderer::new(&ctx),
             ctx,
             globals_buffer,
             globals_bind_group,
             depth: None,
             last_time: None,
             textures: HashMap::new(),
+            materials,
         }
     }
 
@@ -171,12 +180,57 @@ impl Renderer {
         self.static_mesh.destroy_shader(id);
     }
 
+    // ---- skinned meshes ---------------------------------------------------------
+
+    pub fn create_skinned_mesh(&mut self, data: &SkinnedMeshData) -> SkinnedMeshId {
+        self.skinned_mesh.create_mesh(data)
+    }
+
+    pub fn destroy_skinned_mesh(&mut self, id: SkinnedMeshId) {
+        self.skinned_mesh.destroy_mesh(id);
+    }
+
+    /// Validate a joint hierarchy and precompute its inverse bind matrices.
+    pub fn create_skeleton(&mut self, desc: &SkeletonDesc) -> Result<SkeletonId, RenderError> {
+        self.skinned_mesh.create_skeleton(desc)
+    }
+
+    pub fn destroy_skeleton(&mut self, id: SkeletonId) {
+        self.skinned_mesh.destroy_skeleton(id);
+    }
+
+    /// Compile a shader against the skinned mesh contract
+    /// ([`skinned_mesh::PRELUDE`](crate::skinned_mesh::PRELUDE)).
+    pub fn create_skinned_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<SkinnedShaderId, RenderError> {
+        self.skinned_mesh.create_shader(desc)
+    }
+
+    /// Recompile a skinned shader in place, keeping its ID. On error the
+    /// previous version keeps running.
+    pub fn update_skinned_shader(&mut self, id: SkinnedShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
+        self.skinned_mesh.update_shader(id, desc)
+    }
+
+    pub fn destroy_skinned_shader(&mut self, id: SkinnedShaderId) {
+        self.skinned_mesh.destroy_shader(id);
+    }
+
+    // ---- materials ----------------------------------------------------------------
+
+    /// A material for static meshes (shader is a [`MeshShaderId`]) or skinned
+    /// meshes (shader is a [`SkinnedShaderId`]).
     pub fn create_material(&mut self, desc: &MaterialDesc<'_>) -> Result<MaterialId, RenderError> {
-        self.static_mesh.create_material(desc, &self.textures)
+        match desc.shader {
+            MaterialShader::Mesh(id) if !self.static_mesh.has_shader(id) => Err(RenderError::UnknownShader(id)),
+            MaterialShader::Skinned(id) if !self.skinned_mesh.has_shader(id) => {
+                Err(RenderError::UnknownSkinnedShader(id))
+            }
+            _ => self.materials.create(desc, &self.textures),
+        }
     }
 
     pub fn destroy_material(&mut self, id: MaterialId) {
-        self.static_mesh.destroy_material(id);
+        self.materials.destroy(id);
     }
 
     // ---- sky --------------------------------------------------------------------
@@ -230,13 +284,16 @@ impl Renderer {
         let gpu = &self.ctx.gpu;
         gpu.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
 
-        let frame = FrameData { prev, curr, alpha };
+        self.materials.update_params(prev, curr, alpha);
+
+        let frame = FrameData { prev, curr, alpha, materials: &self.materials };
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enso frame") });
 
         // Add new subrenderers to both arrays, in draw order.
-        let subrenderers: [&mut dyn SubRenderer; 2] = [&mut self.sky, &mut self.static_mesh];
+        let subrenderers: [&mut dyn SubRenderer; 3] =
+            [&mut self.sky, &mut self.static_mesh, &mut self.skinned_mesh];
         for sub in subrenderers {
             sub.prepare(&frame, &mut encoder);
         }
@@ -266,9 +323,10 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            let subrenderers: [&dyn SubRenderer; 2] = [&self.sky, &self.static_mesh];
+            let data = DrawData { globals: &self.globals_bind_group, materials: &self.materials };
+            let subrenderers: [&dyn SubRenderer; 3] = [&self.sky, &self.static_mesh, &self.skinned_mesh];
             for sub in subrenderers {
-                sub.draw(&mut pass, &self.globals_bind_group);
+                sub.draw(&mut pass, &data);
             }
         }
 

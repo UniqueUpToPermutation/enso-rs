@@ -28,3 +28,7 @@ test = true
 [[example]]
 name = "sky"
 test = true
+
+[[example]]
+name = "tentacles"
+test = true

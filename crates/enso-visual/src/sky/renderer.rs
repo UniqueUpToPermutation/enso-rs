@@ -9,7 +9,7 @@ use super::{PRELUDE, Sky, SkyShaderDesc};
 use crate::{
     RenderError, SkyShaderId,
     shader,
-    subrenderer::{FrameData, RenderContext, SubRenderer},
+    subrenderer::{DrawData, FrameData, RenderContext, SubRenderer},
     world::MaterialParams,
 };
 
@@ -97,7 +97,7 @@ impl SkyRenderer {
 
     fn build_pipeline(&self, desc: &SkyShaderDesc<'_>) -> Result<wgpu::RenderPipeline, RenderError> {
         let device = &self.ctx.gpu.device;
-        let source = shader::compose(PRELUDE, desc.source);
+        let source = shader::compose(&[PRELUDE], desc.source);
 
         shader::capture_errors(device, desc.label, || {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -168,10 +168,10 @@ impl SubRenderer for SkyRenderer {
         }
     }
 
-    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, globals: &wgpu::BindGroup) {
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, data: &DrawData<'_>) {
         let Some(pipeline) = self.current.and_then(|id| self.shaders.get(&id)) else { return };
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, globals, &[]);
+        pass.set_bind_group(0, data.globals, &[]);
         pass.set_bind_group(1, &self.params_bind_group, &[]);
         pass.draw(0..3, 0..1); // the fullscreen triangle
     }

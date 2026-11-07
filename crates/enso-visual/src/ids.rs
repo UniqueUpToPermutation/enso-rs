@@ -47,7 +47,22 @@ define_id!(
     SkyShaderId
 );
 define_id!(
-    /// A static mesh material, from
+    /// Skinned mesh geometry, from
+    /// [`Renderer::create_skinned_mesh`](crate::Renderer::create_skinned_mesh).
+    SkinnedMeshId
+);
+define_id!(
+    /// A skinned mesh shader, from
+    /// [`Renderer::create_skinned_shader`](crate::Renderer::create_skinned_shader).
+    SkinnedShaderId
+);
+define_id!(
+    /// A joint hierarchy, from
+    /// [`Renderer::create_skeleton`](crate::Renderer::create_skeleton).
+    SkeletonId
+);
+define_id!(
+    /// A material (shader + textures + knobs), from
     /// [`Renderer::create_material`](crate::Renderer::create_material).
     MaterialId
 );
