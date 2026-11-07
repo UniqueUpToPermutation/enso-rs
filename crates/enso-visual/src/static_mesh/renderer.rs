@@ -6,7 +6,7 @@ use wgpu::util::DeviceExt;
 
 use super::{BlendMode, MAX_TEXTURES, MaterialDesc, MeshData, MeshDraw, PRELUDE, ShaderDesc, Vertex};
 use crate::{
-    MaterialId, MeshId, RenderError, ShaderId, TextureId,
+    MaterialId, MeshId, RenderError, MeshShaderId, TextureId,
     shader,
     subrenderer::{FrameData, RenderContext, SubRenderer, white_texture},
     texture::Texture,
@@ -57,7 +57,7 @@ struct MeshEntry {
 }
 
 struct MaterialEntry {
-    shader: ShaderId,
+    shader: MeshShaderId,
     bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
     default_params: MaterialParams,
@@ -71,7 +71,7 @@ struct MaterialEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct SortKey {
     blended: bool,
-    shader: ShaderId,
+    shader: MeshShaderId,
     material: MaterialId,
     mesh: MeshId,
 }
@@ -88,7 +88,7 @@ pub(crate) struct StaticMeshRenderer {
     sampler: wgpu::Sampler,
     white: Texture,
 
-    shaders: HashMap<ShaderId, ShaderEntry>,
+    shaders: HashMap<MeshShaderId, ShaderEntry>,
     meshes: HashMap<MeshId, MeshEntry>,
     materials: HashMap<MaterialId, MaterialEntry>,
 
@@ -179,16 +179,16 @@ impl StaticMeshRenderer {
 
     // ---- shaders ----
 
-    pub(crate) fn create_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<ShaderId, RenderError> {
+    pub(crate) fn create_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<MeshShaderId, RenderError> {
         let entry = self.build_shader(desc)?;
-        let id = ShaderId::next();
+        let id = MeshShaderId::next();
         self.shaders.insert(id, entry);
         Ok(id)
     }
 
     /// Recompile in place. Materials using `id` pick up the new version
     /// immediately. On error the old version stays.
-    pub(crate) fn update_shader(&mut self, id: ShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
+    pub(crate) fn update_shader(&mut self, id: MeshShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
         if !self.shaders.contains_key(&id) {
             return Err(RenderError::UnknownShader(id));
         }
@@ -197,7 +197,7 @@ impl StaticMeshRenderer {
         Ok(())
     }
 
-    pub(crate) fn destroy_shader(&mut self, id: ShaderId) {
+    pub(crate) fn destroy_shader(&mut self, id: MeshShaderId) {
         self.shaders.remove(&id);
     }
 

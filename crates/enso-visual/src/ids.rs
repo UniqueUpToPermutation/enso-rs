@@ -39,7 +39,12 @@ define_id!(
 define_id!(
     /// A static mesh shader, from
     /// [`Renderer::create_mesh_shader`](crate::Renderer::create_mesh_shader).
-    ShaderId
+    MeshShaderId
+);
+define_id!(
+    /// A sky shader, from
+    /// [`Renderer::create_sky_shader`](crate::Renderer::create_sky_shader).
+    SkyShaderId
 );
 define_id!(
     /// A static mesh material, from

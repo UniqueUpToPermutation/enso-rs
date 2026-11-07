@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use glam::Vec4;
 
-use crate::{Camera, MaterialId, static_mesh::MeshDraw};
+use crate::{Camera, MaterialId, sky::Sky, static_mesh::MeshDraw};
 
 /// The four `vec4` knobs of a material (`material.params[0..4]` in WGSL).
 pub type MaterialParams = [Vec4; 4];
@@ -35,8 +35,12 @@ pub struct RenderWorld {
     /// `globals.time`.
     pub time: f64,
     pub camera: Camera,
-    /// Linear RGBA.
+    /// Linear RGBA. Visible wherever nothing is drawn (i.e. when there is
+    /// no sky).
     pub clear_color: Vec4,
+    /// Drawn first, behind everything. Like the camera, it is kept by
+    /// [`clear`](Self::clear); set it to `None` to remove it.
+    pub sky: Option<Sky>,
     /// Static mesh instances.
     pub meshes: Vec<MeshDraw>,
     /// Per-tick material knob values. Materials not listed fall back to the
@@ -50,6 +54,7 @@ impl Default for RenderWorld {
             time: 0.0,
             camera: Camera::default(),
             clear_color: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            sky: None,
             meshes: Vec::new(),
             material_params: HashMap::new(),
         }
@@ -62,7 +67,7 @@ impl RenderWorld {
     }
 
     /// Remove all draws and material params, keeping allocated capacity.
-    /// Time, camera and clear colour are left as they are.
+    /// Time, camera, clear colour and sky are left as they are.
     pub fn clear(&mut self) {
         self.meshes.clear();
         self.material_params.clear();

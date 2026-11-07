@@ -24,3 +24,7 @@ winit.workspace = true
 [[example]]
 name = "static_mesh"
 test = true
+
+[[example]]
+name = "sky"
+test = true

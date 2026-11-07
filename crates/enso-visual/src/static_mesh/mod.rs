@@ -15,7 +15,7 @@ use glam::Vec4;
 pub use geometry::{MeshData, Vertex};
 pub(crate) use renderer::StaticMeshRenderer;
 
-use crate::{MaterialId, MeshId, ShaderId, TextureId, Transform, world::MaterialParams};
+use crate::{MaterialId, MeshId, MeshShaderId, TextureId, Transform, world::MaterialParams};
 
 /// The WGSL contract prepended to every static mesh shader.
 pub const PRELUDE: &str = include_str!("prelude.wgsl");
@@ -64,7 +64,7 @@ impl<'a> ShaderDesc<'a> {
 /// values for its four knobs.
 #[derive(Debug, Clone)]
 pub struct MaterialDesc<'a> {
-    pub shader: ShaderId,
+    pub shader: MeshShaderId,
     /// Bound to `texture0`.. in order; missing slots are 1x1 white.
     pub textures: &'a [TextureId],
     /// Used whenever a `RenderWorld` does not set this material's params.
@@ -72,7 +72,7 @@ pub struct MaterialDesc<'a> {
 }
 
 impl<'a> MaterialDesc<'a> {
-    pub fn new(shader: ShaderId) -> Self {
+    pub fn new(shader: MeshShaderId) -> Self {
         Self { shader, textures: &[], params: [Vec4::ZERO; 4] }
     }
     pub fn with_textures(mut self, textures: &'a [TextureId]) -> Self {

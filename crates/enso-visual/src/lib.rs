@@ -10,11 +10,11 @@
 //!                          alpha ────┘        │
 //!                                             ├─ interpolates camera, time, transforms, knobs
 //!                                             └─ subrenderers (private), drawn in order:
-//!                                                  static meshes, ...
+//!                                                  sky, static meshes, ...
 //! ```
 //!
 //! * **Resources** are created on the [`Renderer`] and referred to by ID:
-//!   [`TextureId`], [`MeshId`], [`ShaderId`], [`MaterialId`].
+//!   [`TextureId`], [`MeshId`], [`MeshShaderId`], [`MaterialId`].
 //! * **Per tick**, the application describes what to draw in a
 //!   [`RenderWorld`]: plain data, no GPU handles.
 //! * **Shaders** are written against a subrenderer's contract, a WGSL
@@ -27,6 +27,7 @@ mod ids;
 mod offscreen;
 mod renderer;
 mod shader;
+pub mod sky;
 pub mod static_mesh;
 mod subrenderer;
 mod texture;
@@ -38,7 +39,7 @@ mod world;
 pub use camera::Camera;
 pub use error::RenderError;
 pub use gpu::{Gpu, GpuError};
-pub use ids::{MaterialId, MeshId, ShaderId, TextureId};
+pub use ids::{MaterialId, MeshId, MeshShaderId, SkyShaderId, TextureId};
 pub use offscreen::OffscreenTarget;
 pub use renderer::{DEPTH_FORMAT, RenderTarget, Renderer};
 pub use shader::GLOBALS_WGSL;

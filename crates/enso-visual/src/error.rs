@@ -1,4 +1,4 @@
-use crate::ids::{ShaderId, TextureId};
+use crate::ids::{MeshShaderId, SkyShaderId, TextureId};
 
 /// Everything that can go wrong when creating or updating render resources.
 #[derive(Debug, thiserror::Error)]
@@ -9,8 +9,11 @@ pub enum RenderError {
     #[error("unknown texture {0:?} (never created, or destroyed)")]
     UnknownTexture(TextureId),
 
-    #[error("unknown shader {0:?} (never created, or destroyed)")]
-    UnknownShader(ShaderId),
+    #[error("unknown mesh shader {0:?} (never created, or destroyed)")]
+    UnknownShader(MeshShaderId),
+
+    #[error("unknown sky shader {0:?} (never created, or destroyed)")]
+    UnknownSkyShader(SkyShaderId),
 
     #[error("a material takes at most {max} textures, got {got}")]
     TooManyTextures { max: usize, got: usize },

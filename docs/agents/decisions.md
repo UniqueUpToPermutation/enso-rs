@@ -46,6 +46,15 @@ the scene code isn't duplicated. Goldens live next to the examples, and
 on >0.1% of pixels fails. Rendering at `alpha = 0.5` also exercises
 interpolation.
 
+**2026-11-07: Sky subrenderer: fullscreen triangle, drawn first.** (Owner's
+request.) The prelude provides the vertex stage, and users write `fs_main`
+using `sky_view_dir()`, which needed `inv_view_proj` in the globals. It's
+drawn first with depth `Always` and no depth write. Drawing it last
+(depth = 1.0, `LessEqual`) would avoid overdraw but paint over blended
+meshes. The sky persists across `clear()` like the camera.
+`ShaderId` was renamed `MeshShaderId` next to `SkyShaderId` so mixing them
+up is a type error.
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.

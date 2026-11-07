@@ -23,8 +23,9 @@ use std::{
 };
 
 use enso_visual::{
-    RenderWorld, Renderer, ShaderId,
+    MeshShaderId, RenderError, RenderWorld, Renderer, SkyShaderId,
     glam::Vec4,
+    sky::SkyShaderDesc,
     static_mesh::{BlendMode, ShaderDesc},
 };
 
@@ -51,7 +52,7 @@ pub trait Example: 'static {
 
     /// Describe the world at `time` (seconds). Called `TICK_HZ` times per
     /// second. `world` arrives with draws and material params cleared;
-    /// camera, time and clear colour still hold the previous tick's values.
+    /// camera, time, clear colour and sky still hold the previous tick's values.
     fn simulate(&mut self, time: f64, world: &mut RenderWorld);
 }
 
@@ -65,8 +66,26 @@ impl Setup<'_> {
     /// Load `examples/shaders/<file>` as a static mesh shader. In the window
     /// it is recompiled whenever the file is saved; a broken edit logs the
     /// error and keeps the previous version running.
-    pub fn mesh_shader(&mut self, file: &str, blend: BlendMode) -> ShaderId {
-        self.shaders.load(self.renderer, file, blend)
+    pub fn mesh_shader(&mut self, file: &str, blend: BlendMode) -> MeshShaderId {
+        let source = ShaderWatcher::read(file);
+        let id = self
+            .renderer
+            .create_mesh_shader(&ShaderDesc::new(file, &source).blend(blend))
+            .unwrap_or_else(|err| panic!("initial shader must compile: {err}"));
+        self.shaders.watch(file, ShaderKind::Mesh { id, blend });
+        id
+    }
+
+    /// Load `examples/shaders/<file>` as a sky shader, with the same hot
+    /// reload behaviour as [`mesh_shader`](Self::mesh_shader).
+    pub fn sky_shader(&mut self, file: &str) -> SkyShaderId {
+        let source = ShaderWatcher::read(file);
+        let id = self
+            .renderer
+            .create_sky_shader(&SkyShaderDesc::new(file, &source))
+            .unwrap_or_else(|err| panic!("initial shader must compile: {err}"));
+        self.shaders.watch(file, ShaderKind::Sky { id });
+        id
     }
 }
 
@@ -112,22 +131,40 @@ struct ShaderWatcher {
 }
 
 struct WatchedShader {
-    id: ShaderId,
+    kind: ShaderKind,
     path: PathBuf,
-    blend: BlendMode,
     modified: Option<SystemTime>,
 }
 
+/// Which renderer entry point recompiles this shader.
+enum ShaderKind {
+    Mesh { id: MeshShaderId, blend: BlendMode },
+    Sky { id: SkyShaderId },
+}
+
+impl ShaderKind {
+    fn update(&self, renderer: &mut Renderer, label: &str, source: &str) -> Result<(), RenderError> {
+        match *self {
+            Self::Mesh { id, blend } => renderer.update_mesh_shader(id, &ShaderDesc::new(label, source).blend(blend)),
+            Self::Sky { id } => renderer.update_sky_shader(id, &SkyShaderDesc::new(label, source)),
+        }
+    }
+}
+
 impl ShaderWatcher {
-    fn load(&mut self, renderer: &mut Renderer, file: &str, blend: BlendMode) -> ShaderId {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/shaders").join(file);
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        let id = renderer
-            .create_mesh_shader(&ShaderDesc::new(file, &source).blend(blend))
-            .unwrap_or_else(|err| panic!("initial shader must compile: {err}"));
-        self.shaders.push(WatchedShader { id, modified: modified_time(&path), path, blend });
-        id
+    fn path(file: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/shaders").join(file)
+    }
+
+    /// Read `examples/shaders/<file>`, panicking if it's missing (setup only).
+    fn read(file: &str) -> String {
+        let path = Self::path(file);
+        std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
+    }
+
+    fn watch(&mut self, file: &str, kind: ShaderKind) {
+        let path = Self::path(file);
+        self.shaders.push(WatchedShader { kind, modified: modified_time(&path), path });
     }
 
     /// Check (at most 4 times a second) for edited shader files.
@@ -152,7 +189,7 @@ impl ShaderWatcher {
                     continue;
                 }
             };
-            match renderer.update_mesh_shader(shader.id, &ShaderDesc::new(&label, &source).blend(shader.blend)) {
+            match shader.kind.update(renderer, &label, &source) {
                 Ok(()) => log::info!("reloaded {label}"),
                 Err(err) => log::error!("{err}\n(keeping the previous shader)"),
             }

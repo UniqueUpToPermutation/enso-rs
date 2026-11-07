@@ -19,6 +19,7 @@ pub const GLOBALS_WGSL: &str = r#"
 // ---- enso globals (group 0) ----
 struct Globals {
     view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,  // clip space -> world space
     camera_position: vec4<f32>,  // xyz = eye position
     resolution: vec2<f32>,       // render target size in pixels
     time: f32,                   // interpolated simulation time, seconds

@@ -4,7 +4,8 @@ use bytemuck::Zeroable as _;
 use wgpu::util::DeviceExt;
 
 use crate::{
-    Gpu, MaterialId, MeshId, RenderError, RenderWorld, ShaderId, TextureId,
+    Gpu, MaterialId, MeshId, MeshShaderId, RenderError, RenderWorld, SkyShaderId, TextureId,
+    sky::{SkyRenderer, SkyShaderDesc},
     static_mesh::{MaterialDesc, MeshData, ShaderDesc, StaticMeshRenderer},
     subrenderer::{FrameData, RenderContext, SubRenderer},
     texture::{Texture, TextureDesc},
@@ -24,6 +25,7 @@ pub struct RenderTarget<'a> {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GlobalsUniform {
     view_proj: [[f32; 4]; 4],
+    inv_view_proj: [[f32; 4]; 4],
     camera_position: [f32; 4],
     resolution: [f32; 2],
     time: f32,
@@ -51,6 +53,7 @@ pub struct Renderer {
     textures: HashMap<TextureId, Texture>,
 
     // Subrenderers, in draw order.
+    sky: SkyRenderer,
     static_mesh: StaticMeshRenderer,
 }
 
@@ -101,6 +104,7 @@ impl Renderer {
         };
 
         Self {
+            sky: SkyRenderer::new(&ctx),
             static_mesh: StaticMeshRenderer::new(&ctx),
             ctx,
             globals_buffer,
@@ -153,17 +157,17 @@ impl Renderer {
 
     /// Compile a shader against the static mesh contract
     /// ([`static_mesh::PRELUDE`](crate::static_mesh::PRELUDE)).
-    pub fn create_mesh_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<ShaderId, RenderError> {
+    pub fn create_mesh_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<MeshShaderId, RenderError> {
         self.static_mesh.create_shader(desc)
     }
 
     /// Recompile a shader in place, keeping its ID, so every material using
     /// it switches over. On error the previous version keeps running.
-    pub fn update_mesh_shader(&mut self, id: ShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
+    pub fn update_mesh_shader(&mut self, id: MeshShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError> {
         self.static_mesh.update_shader(id, desc)
     }
 
-    pub fn destroy_mesh_shader(&mut self, id: ShaderId) {
+    pub fn destroy_mesh_shader(&mut self, id: MeshShaderId) {
         self.static_mesh.destroy_shader(id);
     }
 
@@ -173,6 +177,24 @@ impl Renderer {
 
     pub fn destroy_material(&mut self, id: MaterialId) {
         self.static_mesh.destroy_material(id);
+    }
+
+    // ---- sky --------------------------------------------------------------------
+
+    /// Compile a sky shader against the sky contract
+    /// ([`sky::PRELUDE`](crate::sky::PRELUDE)): you write `fs_main` only.
+    pub fn create_sky_shader(&mut self, desc: &SkyShaderDesc<'_>) -> Result<SkyShaderId, RenderError> {
+        self.sky.create_shader(desc)
+    }
+
+    /// Recompile a sky shader in place, keeping its ID. On error the
+    /// previous version keeps running.
+    pub fn update_sky_shader(&mut self, id: SkyShaderId, desc: &SkyShaderDesc<'_>) -> Result<(), RenderError> {
+        self.sky.update_shader(id, desc)
+    }
+
+    pub fn destroy_sky_shader(&mut self, id: SkyShaderId) {
+        self.sky.destroy_shader(id);
     }
 
     // ---- the frame ------------------------------------------------------------
@@ -196,8 +218,10 @@ impl Renderer {
         let clear = prev.clear_color.lerp(curr.clear_color, alpha).as_dvec4();
         let aspect = target.width as f32 / target.height.max(1) as f32;
 
+        let view_proj = camera.view_proj(aspect);
         let globals = GlobalsUniform {
-            view_proj: camera.view_proj(aspect).to_cols_array_2d(),
+            view_proj: view_proj.to_cols_array_2d(),
+            inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             camera_position: camera.eye.extend(1.0).to_array(),
             resolution: [target.width as f32, target.height as f32],
             time: time as f32,
@@ -212,7 +236,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enso frame") });
 
         // Add new subrenderers to both arrays, in draw order.
-        let subrenderers: [&mut dyn SubRenderer; 1] = [&mut self.static_mesh];
+        let subrenderers: [&mut dyn SubRenderer; 2] = [&mut self.sky, &mut self.static_mesh];
         for sub in subrenderers {
             sub.prepare(&frame, &mut encoder);
         }
@@ -242,7 +266,7 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            let subrenderers: [&dyn SubRenderer; 1] = [&self.static_mesh];
+            let subrenderers: [&dyn SubRenderer; 2] = [&self.sky, &self.static_mesh];
             for sub in subrenderers {
                 sub.draw(&mut pass, &self.globals_bind_group);
             }
