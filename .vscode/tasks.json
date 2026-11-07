@@ -1,0 +1,31 @@
+{
+  // Build tasks used by launch.json (and runnable via "Tasks: Run Task").
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cargo build: current example",
+      "type": "shell",
+      "command": "cargo",
+      // ${fileBasenameNoExtension} = the example file open in the editor.
+      "args": ["build", "-p", "enso-visual", "--example", "${fileBasenameNoExtension}"],
+      "problemMatcher": ["$rustc"],
+      "group": "build"
+    },
+    {
+      "label": "cargo build: current example (release)",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--release", "-p", "enso-visual", "--example", "${fileBasenameNoExtension}"],
+      "problemMatcher": ["$rustc"],
+      "group": "build"
+    },
+    {
+      "label": "cargo build: static_mesh",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "-p", "enso-visual", "--example", "static_mesh"],
+      "problemMatcher": ["$rustc"],
+      "group": { "kind": "build", "isDefault": true }
+    }
+  ]
+}

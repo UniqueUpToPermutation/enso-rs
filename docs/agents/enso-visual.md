@@ -34,7 +34,22 @@ renderer.render(RenderTarget, &prev, &curr, alpha)
 | `src/static_mesh/renderer.rs` | Private `StaticMeshRenderer`: resource maps, interpolation, sort/batch, draw |
 | `src/static_mesh/prelude.wgsl` | Shader contract: `VertexIn` (loc 0-2), `InstanceIn` (loc 3-8), group 1 material |
 | `src/static_mesh/geometry.rs` | `Vertex`, `MeshData::{quad, cube, uv_sphere}` + winding tests |
-| `examples/static_mesh.rs` | Fixed 20 Hz sim, interpolation toggle, `LiveShader` hot reload |
+| `examples/common/mod.rs` | Shared example harness (see below) |
+| `examples/static_mesh.rs` | Cubes + wobbling sphere at a 20 Hz sim; only scene code |
+
+## Example harness
+
+`examples/common/mod.rs` is included by each example with `mod common;`.
+Cargo doesn't build it as an example because it is neither `examples/*.rs`
+nor `examples/*/main.rs`. It owns logging, the winit window/surface, the
+fixed-timestep loop (`prev.clone_from(&curr); curr.clear(); simulate`),
+interpolation toggle (Space), quit (Esc), and shader hot reload.
+
+A new example implements `common::Example` (`TITLE`, optional `TICK_HZ`,
+`init(&mut Setup)`, `simulate(time, &mut RenderWorld)`) and calls
+`common::run::<MyExample>()` from `main`. Load shaders with
+`setup.mesh_shader("file.wgsl", blend)` (files in `examples/shaders/`) to get
+hot reload for free. Helpers: `checkerboard`, `hue`.
 
 ## Shader composition
 

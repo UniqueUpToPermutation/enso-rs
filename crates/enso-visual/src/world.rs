@@ -17,13 +17,16 @@ pub type MaterialParams = [Vec4; 4];
 ///
 /// The renderer is given *two* of these, the previous and current tick, plus
 /// an `alpha` to blend between them (see [`Renderer::render`]). A typical
-/// loop keeps two worlds and swaps them each tick:
+/// loop keeps two worlds and advances them each tick:
 ///
 /// ```ignore
-/// std::mem::swap(&mut prev, &mut curr);
-/// curr.clear();            // keeps allocations
+/// prev.clone_from(&curr);  // copy, reusing prev's allocations
+/// curr.clear();            // draws/params gone; camera, time, clear colour carry over
 /// simulate(&mut curr);     // fill in this tick
 /// ```
+///
+/// (Swapping instead of copying would leave `curr` holding the world from
+/// *two* ticks ago, so anything not re-set every tick would jump back.)
 ///
 /// [`Renderer::render`]: crate::Renderer::render
 #[derive(Debug, Clone)]

@@ -1,0 +1,41 @@
+{
+  // Debugging uses the Microsoft C/C++ extension's Windows debugger
+  // (cppvsdbg), which reads the PDB files produced by Rust's MSVC toolchain.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug static_mesh",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "preLaunchTask": "cargo build: static_mesh",
+      "program": "${workspaceFolder}/target/debug/examples/static_mesh.exe",
+      "cwd": "${workspaceFolder}",
+      "environment": [{ "name": "RUST_BACKTRACE", "value": "1" }],
+      // Integrated terminal so env_logger output (stderr) is visible.
+      "console": "integratedTerminal"
+    },
+    {
+      // Open any file in examples/ (e.g. static_mesh.rs) and pick this.
+      "name": "Debug current example",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "preLaunchTask": "cargo build: current example",
+      "program": "${workspaceFolder}/target/debug/examples/${fileBasenameNoExtension}.exe",
+      "cwd": "${workspaceFolder}",
+      "environment": [{ "name": "RUST_BACKTRACE", "value": "1" }],
+      "console": "integratedTerminal"
+    },
+    {
+      // Optimised build, still debuggable ([profile.release] debug = true).
+      // Variables may show as "optimized away"; use this for performance.
+      "name": "Release current example",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "preLaunchTask": "cargo build: current example (release)",
+      "program": "${workspaceFolder}/target/release/examples/${fileBasenameNoExtension}.exe",
+      "cwd": "${workspaceFolder}",
+      "environment": [{ "name": "RUST_BACKTRACE", "value": "1" }],
+      "console": "integratedTerminal"
+    }
+  ]
+}
