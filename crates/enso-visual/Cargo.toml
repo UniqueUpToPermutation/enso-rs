@@ -43,3 +43,7 @@ test = true
 [[example]]
 name = "text"
 test = true
+
+[[example]]
+name = "sprites"
+test = true

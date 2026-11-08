@@ -23,8 +23,8 @@ use std::{
 };
 
 use enso_visual::{
-    BlendMode, MeshShaderId, RenderError, RenderWorld, Renderer, ShaderDesc, SkinnedShaderId, SkyShaderId, TextShaderId,
-    WgpuRenderer,
+    BlendMode, MeshShaderId, RenderError, RenderWorld, Renderer, ShaderDesc, SkinnedShaderId, SkyShaderId,
+    SpriteShaderId, TextShaderId, WgpuRenderer,
     glam::Vec4,
     sky::SkyShaderDesc,
 };
@@ -85,6 +85,18 @@ impl Setup<'_> {
             .create_skinned_shader(&ShaderDesc::new(file, &source).blend(blend))
             .unwrap_or_else(|err| panic!("initial shader must compile: {err}"));
         self.shaders.watch(file, ShaderKind::Skinned { id, blend });
+        id
+    }
+
+    /// Load `examples/shaders/<file>` as a sprite shader, with the same hot
+    /// reload behaviour as [`mesh_shader`](Self::mesh_shader).
+    pub fn sprite_shader(&mut self, file: &str, blend: BlendMode) -> SpriteShaderId {
+        let source = ShaderWatcher::read(file);
+        let id = self
+            .renderer
+            .create_sprite_shader(&ShaderDesc::new(file, &source).blend(blend))
+            .unwrap_or_else(|err| panic!("initial shader must compile: {err}"));
+        self.shaders.watch(file, ShaderKind::Sprite { id, blend });
         id
     }
 
@@ -166,6 +178,7 @@ enum ShaderKind {
     Skinned { id: SkinnedShaderId, blend: BlendMode },
     Sky { id: SkyShaderId },
     Text { id: TextShaderId, blend: BlendMode },
+    Sprite { id: SpriteShaderId, blend: BlendMode },
 }
 
 impl ShaderKind {
@@ -178,6 +191,9 @@ impl ShaderKind {
             }
             Self::Sky { id } => renderer.update_sky_shader(id, &SkyShaderDesc::new(label, source)),
             Self::Text { id, blend } => renderer.update_text_shader(id, &ShaderDesc::new(label, source).blend(blend)),
+            Self::Sprite { id, blend } => {
+                renderer.update_sprite_shader(id, &ShaderDesc::new(label, source).blend(blend))
+            }
         }
     }
 }

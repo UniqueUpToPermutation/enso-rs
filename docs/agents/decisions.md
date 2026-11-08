@@ -121,6 +121,15 @@ glyphon remains an option for tiny overlay text. The example font is
 **Noto Sans** (OFL): Inter was tried first, but its overlapping contours
 break fdsm's output.
 
+**2026-11-07: Sprite subrenderer with three orientation modes.** (Owner
+asked for sprites that double as billboards, facing the camera fully or
+only around the vertical axis.) The modes are `Billboard::{Fixed, Camera,
+Upright}`; `Fixed` covers plain sprites. The billboard maths runs in the
+vertex shader (`sprite_corner()`), which needed the **view matrix in the
+globals**: existing goldens were unchanged. `Camera` is screen-aligned
+(uses the camera's right/up vectors). `uv_rect` is not interpolated, so
+sprite-sheet frames cut cleanly.
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.
@@ -133,6 +142,8 @@ break fdsm's output.
 - `// @range(a, b) @default(x)` comment annotations on parameter fields for
   GUI sliders and defaults.
 - egui control panel generated from `material_params` / `instance_params`.
+- Back-to-front sorting of blended draws (sprites, text, blended meshes)
+  by view depth, so overlapping alpha surfaces composite correctly.
 - Text: kerning (GPOS via a shaper), cosmic-text layout (shaping,
   wrapping, fallback fonts), overlap removal before MSDF generation,
   caching atlases to disk, vertical alignment options.

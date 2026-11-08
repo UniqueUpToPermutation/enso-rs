@@ -1,5 +1,5 @@
 use crate::{
-    ids::{MaterialId, MeshShaderId, SkinnedShaderId, SkyShaderId, TextShaderId, TextureId},
+    ids::{MaterialId, MeshShaderId, SkinnedShaderId, SkyShaderId, SpriteShaderId, TextShaderId, TextureId},
     params::ParamKind,
 };
 
@@ -23,6 +23,9 @@ pub enum RenderError {
 
     #[error("unknown text shader {0:?} (never created, or destroyed)")]
     UnknownTextShader(TextShaderId),
+
+    #[error("unknown sprite shader {0:?} (never created, or destroyed)")]
+    UnknownSpriteShader(SpriteShaderId),
 
     #[error("invalid font: {0}")]
     InvalidFont(String),

@@ -10,7 +10,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    Gpu, MaterialId, MeshShaderId, RenderError, RenderWorld, SkinnedShaderId, SkyShaderId, TextShaderId, TextureId,
+    Gpu, MaterialId, MeshShaderId, RenderError, RenderWorld, SkinnedShaderId, SkyShaderId, SpriteShaderId,
+    TextShaderId, TextureId,
     params::{Param, ParamLayout, ParamName, ParamType, ParamValue},
     texture::{Texture, TextureDesc},
 };
@@ -25,13 +26,21 @@ pub const MAX_TEXTURES: usize = 4;
 /// used: `Mesh` for [`MeshDraw`](crate::static_mesh::MeshDraw), `Skinned`
 /// for [`SkinnedDraw`](crate::skinned_mesh::SkinnedDraw), `Sky` for
 /// [`RenderWorld::sky`](crate::RenderWorld::sky), `Text` for
-/// [`TextDraw`](crate::text::TextDraw).
+/// [`TextDraw`](crate::text::TextDraw), `Sprite` for
+/// [`SpriteDraw`](crate::sprite::SpriteDraw).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MaterialShader {
     Mesh(MeshShaderId),
     Skinned(SkinnedShaderId),
     Sky(SkyShaderId),
     Text(TextShaderId),
+    Sprite(SpriteShaderId),
+}
+
+impl From<SpriteShaderId> for MaterialShader {
+    fn from(id: SpriteShaderId) -> Self {
+        Self::Sprite(id)
+    }
 }
 
 impl From<TextShaderId> for MaterialShader {

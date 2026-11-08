@@ -12,7 +12,7 @@ behind Rust/Cargo choices briefly when you make them.
 
 | Crate | State |
 |---|---|
-| `crates/enso-visual` | Working: wgpu renderer with sky, static mesh, skinned mesh and MSDF text subrenderers, named shader parameters, interpolated `RenderWorld` API, examples with golden tests |
+| `crates/enso-visual` | Working: wgpu renderer with sky, static mesh, skinned mesh, sprite/billboard and MSDF text subrenderers, named shader parameters, interpolated `RenderWorld` API, examples with golden tests |
 | `enso-core`, `enso-io`, `enso-audio`, `enso-engine`, `enso-ui`, `enso` (bin) | Planned, not created yet. See [architecture](docs/agents/architecture.md) |
 
 ## Commands

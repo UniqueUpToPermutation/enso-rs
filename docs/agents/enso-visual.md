@@ -27,6 +27,8 @@ renderer.create_material(&MaterialDesc::new(mesh_or_skinned_shader)) -> Result<M
     // .with_param("base_color", Vec3::ONE) sets a `struct Material` default
 renderer.create_font(&FontDesc::new("Noto Sans", ttf_bytes)) -> Result<FontId>   // builds the MSDF atlas
 renderer.create_text_shader(&ShaderDesc) -> Result<TextShaderId>
+renderer.create_sprite_shader(&ShaderDesc) -> Result<SpriteShaderId>
+renderer.update_sprite_shader(id, &ShaderDesc) -> Result<()>
 renderer.update_text_shader(id, &ShaderDesc) -> Result<()>
 renderer.create_sky_shader(&SkyShaderDesc) -> Result<SkyShaderId>
 renderer.update_sky_shader(id, &SkyShaderDesc) -> Result<()>
@@ -44,6 +46,7 @@ world.sky = Some(sky_material)          // a material of a sky shader; kept by c
 world.draw_mesh(MeshDraw::new(mesh, material, transform).with_key(k)).with(velocity, 0.8).with(age, 0.1)
 world.draw_skinned(SkinnedDraw::new(mesh, skeleton, material, transform).with_key(k), &pose).with(..)
 world.draw_text(TextDraw::new(font, material, transform).with_size(0.5).with_align(TextAlign::Center), "C#").with(..)
+world.draw_sprite(SpriteDraw::new(material, position).with_billboard(Billboard::Upright).with_anchor(Vec2::new(0.5, 0.0))).with(..)
 world.set_param(material, decay, 2.5)
 
 // Per display frame
@@ -78,6 +81,9 @@ Per-subrenderer contract types live in `static_mesh::`, `skinned_mesh::`, `sky::
 | `src/text/font.rs` | `FontAtlas`: ttf-parser outline → fdsm MSDF (f32, sign + error correction, flipped to top-down) → shelf-packed RGBA8 atlas; `layout()` (lines, alignment, `?` fallback) + tests |
 | `src/text/prelude.wgsl` | Text contract: `GlyphIn` (loc 0-8), `glyph_corner()`, `text_screen_distance/coverage/max_reach_px()`, groups 2 (font) and 3 (instances) |
 | `src/text/renderer.rs` | Private `TextRenderer`: fonts (atlas texture + bind group), shaders, one instance per glyph, `draw(0..6, ..)` per batch |
+| `src/sprite/mod.rs` | `SpriteDraw`, `Billboard { Fixed, Camera, Upright }`, `PRELUDE` |
+| `src/sprite/prelude.wgsl` | Sprite contract: `SpriteIn` (loc 0-9), `sprite_corner()` (billboard maths), `camera_right/up/back()`, group 2 `instances` |
+| `src/sprite/renderer.rs` | Private `SpriteRenderer`: one instance per sprite, batch key mesh slot `()`, `draw(0..6, ..)` |
 | `src/offscreen.rs` | `OffscreenTarget`: render into a texture, `read_pixels` back to the CPU |
 | `examples/common/mod.rs` | Example harness: `Example` trait, `Setup`, `Simulation`, shader hot reload, helpers |
 | `examples/common/window.rs` | Interactive winit window + real-time loop (`common::run`) |
@@ -88,6 +94,7 @@ Per-subrenderer contract types live in `static_mesh::`, `skinned_mesh::`, `sky::
 | `examples/tentacles.rs` | Skinned tubes on joint chains, swaying with travelling waves |
 | `examples/notes.rs` | Named parameters: keys struck by a melody (material + instance structs) and sparks (a second shader with a different `Instance` stride) |
 | `examples/text.rs` | MSDF text: waving outlined title, subtitle, ring of note names lit by a playhead, over a sky |
+| `examples/sprites.rs` | All three sprite modes from above: upright cut-out trees, camera-facing glowing orbs, a fixed ground decal (procedural textures) |
 | `examples/fonts/` | Noto Sans Regular + its OFL licence (used by the text example and font tests) |
 | `tests/examples_have_golden_tests.rs` | Guard: every example is registered as a golden test |
 
@@ -164,15 +171,19 @@ declare them, since the preludes bind both):
 | skinned mesh | `MATERIAL_WGSL`, `skinned_mesh::PRELUDE` | `vs_main(SkinnedVertexIn, InstanceIn)`, `fs_main`; optional structs |
 | sky | `MATERIAL_WGSL`, `sky::PRELUDE` (contains `sky_vs_main`) | `fs_main(SkyIn)`; optional `struct Material` |
 | text | `MATERIAL_WGSL`, `text::PRELUDE` | `vs_main(@builtin(vertex_index) u32, GlyphIn)`, `fs_main`; optional structs |
+| sprite | `MATERIAL_WGSL`, `sprite::PRELUDE` | `vs_main(@builtin(vertex_index) u32, SpriteIn)`, `fs_main`; optional structs |
 
 Bind groups:
 
-| Group | Static mesh | Skinned mesh | Sky | Text |
-|---|---|---|---|---|
-| 0 | globals | globals | globals | globals |
-| 1 | material (uniform `Material` + sampler + 4 textures) | material | material | material |
-| 2 | `instances: array<Instance>` (storage) | joint matrices (storage) | | font atlas + sampler + `FontInfo { px_range }` |
-| 3 | | `instances: array<Instance>` (storage) | | `instances` |
+| Group | Static mesh | Skinned mesh | Sky | Text | Sprite |
+|---|---|---|---|---|---|
+| 0 | globals | globals | globals | globals | globals |
+| 1 | material (uniform `Material` + sampler + 4 textures) | material | material | material | material |
+| 2 | `instances: array<Instance>` (storage) | joint matrices (storage) | | font atlas + sampler + `FontInfo { px_range }` | `instances` |
+| 3 | | `instances: array<Instance>` (storage) | | `instances` | |
+
+Globals: `view_proj`, `inv_view_proj`, `view` (rows = camera right/up/back
+in world space), `camera_position`, `resolution`, `time`, `delta_time`.
 
 (Default `max_bind_groups` is 4: a new group needs care.)
 Rust ↔ WGSL layouts must match byte for byte: `GlobalsUniform` ↔ `Globals`,
@@ -215,7 +226,7 @@ globals + parts length. Mapping them back to the user file is a known TODO.
    otherwise `Clear(clear_color)`. Depth is always cleared to 1.0.
    One render pass; `draw()` on each subrenderer in
    order: **sky first** (depth `Always`, no depth write), then static,
-   then skinned meshes, then **text** (blended, so last). Drawing the sky
+   then skinned meshes, then sprites, then **text** (blended, so last). Drawing the sky
    last at depth 1.0 would save overdraw but would paint over blended
    meshes (they don't write depth).
 5. Submit. The caller presents.
@@ -268,6 +279,30 @@ globals + parts length. Mapping them back to the user file is a known TODO.
 - The sky uses the same mechanism: `MaterialShader::Sky`, `struct Material`
   in the sky shader, `world.set_param(sky_material, ..)`.
   `instance_params` of a sky material is an empty list.
+
+## Sprites and billboards
+
+- `SpriteDraw`: transform, `size` (world units, times the transform's
+  scale), `anchor` (0..1 pivot; (0.5, 0) for things standing on the
+  ground), `spin` (in-plane radians), `uv_rect` (sprite-sheet frame, not
+  interpolated), colour, `billboard`.
+- `sprite_corner()` in the prelude builds the quad from `vertex_index`:
+  - `Fixed` (0): `model * (offset, 0, 1)`: the transform's XY plane.
+  - `Camera` (1): `center + camera_right * x + camera_up * y`, from the
+    `view` matrix rows: screen-aligned (not "pointing at" the camera
+    position, which would distort near the screen edges).
+  - `Upright` (2): right = `cross(Y, horizontal direction to the camera)`,
+    up = world Y; falls back to the camera's back direction when the camera
+    is straight above.
+  - Billboards use only the transform's position and per-axis scale
+    (column lengths), not its rotation.
+- Texture = material `texture0` (Repeat sampler: keep texture borders
+  transparent). Cut-outs: `discard` + `BlendMode::Opaque` (depth-correct).
+  Soft sprites: Alpha/Additive. **Blended sprites are not depth-sorted**
+  (batches sort by shader/material; within a batch, submission order), so
+  overlapping alpha sprites can composite out of order. Additive doesn't care.
+- One shader file loaded with several blend modes gives several
+  `SpriteShaderId`s (blend is per pipeline); the example does this.
 
 ## Text (MSDF)
 

@@ -10,7 +10,7 @@
 //!                          alpha ────┘        │
 //!                                             ├─ interpolates camera, time, transforms, poses, knobs
 //!                                             └─ subrenderers (private), drawn in order:
-//!                                                  sky, static meshes, skinned meshes, text
+//!                                                  sky, static meshes, skinned meshes, sprites, text
 //! ```
 //!
 //! * [`Renderer`] is the interface: resource creation (returning IDs) and
@@ -38,6 +38,7 @@ mod renderer;
 mod shader;
 pub mod skinned_mesh;
 pub mod sky;
+pub mod sprite;
 pub mod static_mesh;
 mod subrenderer;
 pub mod text;
@@ -51,8 +52,8 @@ pub use camera::Camera;
 pub use error::RenderError;
 pub use gpu::{Gpu, GpuError};
 pub use ids::{
-    FontId, MaterialId, MeshId, MeshShaderId, SkeletonId, SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextShaderId,
-    TextureId,
+    FontId, MaterialId, MeshId, MeshShaderId, SkeletonId, SkinnedMeshId, SkinnedShaderId, SkyShaderId, SpriteShaderId,
+    TextShaderId, TextureId,
 };
 pub use material::{MAX_TEXTURES, MaterialDesc, MaterialShader};
 pub use offscreen::OffscreenTarget;
@@ -179,6 +180,18 @@ pub trait Renderer {
     fn update_sky_shader(&mut self, id: SkyShaderId, desc: &SkyShaderDesc<'_>) -> Result<(), RenderError>;
 
     fn destroy_sky_shader(&mut self, id: SkyShaderId);
+
+    // ---- sprites ----
+
+    /// Compile a shader against the sprite contract ([`sprite::PRELUDE`]).
+    /// Sprites are always double-sided.
+    fn create_sprite_shader(&mut self, desc: &ShaderDesc<'_>) -> Result<SpriteShaderId, RenderError>;
+
+    /// Recompile a sprite shader in place, keeping its ID. On error the
+    /// previous version keeps running.
+    fn update_sprite_shader(&mut self, id: SpriteShaderId, desc: &ShaderDesc<'_>) -> Result<(), RenderError>;
+
+    fn destroy_sprite_shader(&mut self, id: SpriteShaderId);
 
     // ---- text ----
 

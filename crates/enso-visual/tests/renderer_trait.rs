@@ -6,7 +6,7 @@ use enso_visual::{
     SkeletonId,
     SkinnedMeshId, SkinnedShaderId, SkyShaderId, TextureDesc, TextureId, Transform,
     skinned_mesh::{SkeletonDesc, SkinnedMeshData},
-    FontId, TextShaderId,
+    FontId, SpriteShaderId, TextShaderId,
     sky::SkyShaderDesc,
     static_mesh::{MeshData, MeshDraw},
     text::FontDesc,
@@ -90,6 +90,14 @@ impl Renderer for Recording {
         Ok(())
     }
     fn destroy_sky_shader(&mut self, _: SkyShaderId) {}
+
+    fn create_sprite_shader(&mut self, _: &ShaderDesc<'_>) -> Result<SpriteShaderId, RenderError> {
+        Ok(SpriteShaderId::next())
+    }
+    fn update_sprite_shader(&mut self, _: SpriteShaderId, _: &ShaderDesc<'_>) -> Result<(), RenderError> {
+        Ok(())
+    }
+    fn destroy_sprite_shader(&mut self, _: SpriteShaderId) {}
 
     fn create_font(&mut self, _: &FontDesc<'_>) -> Result<FontId, RenderError> {
         Ok(FontId::next())

@@ -26,12 +26,20 @@ impl Default for Camera {
 }
 
 impl Camera {
-    /// Projection * view, right-handed. wgpu's clip space matches the
-    /// DirectX convention (depth 0..1, Y up), hence `proj::directx`.
+    /// World space -> view space (right-handed, camera looking down -Z).
+    pub fn view(&self) -> Mat4 {
+        camera::rh::view::look_at_mat4(self.eye, self.target, self.up)
+    }
+
+    /// View space -> clip space. wgpu's clip space matches the DirectX
+    /// convention (depth 0..1, Y up), hence `proj::directx`.
+    pub fn projection(&self, aspect: f32) -> Mat4 {
+        camera::rh::proj::directx::perspective(self.fov_y, aspect, self.near, self.far)
+    }
+
+    /// Projection * view.
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
-        let view = camera::rh::view::look_at_mat4(self.eye, self.target, self.up);
-        let proj = camera::rh::proj::directx::perspective(self.fov_y, aspect, self.near, self.far);
-        proj * view
+        self.projection(aspect) * self.view()
     }
 
     /// `t = 0` gives `self`, `t = 1` gives `other`. Clip planes snap to `other`.

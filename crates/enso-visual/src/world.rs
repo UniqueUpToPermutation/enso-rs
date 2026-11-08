@@ -9,6 +9,7 @@ use crate::{
     Camera, MaterialId, Transform,
     params::{Param, ParamName, ParamType, ParamValue},
     skinned_mesh::SkinnedDraw,
+    sprite::SpriteDraw,
     static_mesh::MeshDraw,
     text::TextDraw,
 };
@@ -65,6 +66,8 @@ pub struct RenderWorld {
     pub meshes: Vec<MeshDraw>,
     /// Skinned mesh instances. Add with [`draw_skinned`](Self::draw_skinned).
     pub skinned: Vec<SkinnedDraw>,
+    /// Sprites and billboards. Add with [`draw_sprite`](Self::draw_sprite).
+    pub sprites: Vec<SpriteDraw>,
     /// Text. Add with [`draw_text`](Self::draw_text).
     pub texts: Vec<TextDraw>,
 
@@ -87,6 +90,7 @@ impl Default for RenderWorld {
             sky: None,
             meshes: Vec::new(),
             skinned: Vec::new(),
+            sprites: Vec::new(),
             texts: Vec::new(),
             material_values: HashMap::new(),
             instance_values: Vec::new(),
@@ -106,6 +110,7 @@ impl RenderWorld {
     pub fn clear(&mut self) {
         self.meshes.clear();
         self.skinned.clear();
+        self.sprites.clear();
         self.texts.clear();
         self.material_values.clear();
         self.instance_values.clear();
@@ -147,6 +152,14 @@ impl RenderWorld {
         InstanceParams { values: &mut self.instance_values, span: &mut self.skinned.last_mut().unwrap().params }
     }
 
+    /// Draw a sprite or billboard. Chain [`with`](InstanceParams::with) to
+    /// set its shader's `struct Instance` fields.
+    pub fn draw_sprite(&mut self, mut draw: SpriteDraw) -> InstanceParams<'_> {
+        draw.params = Span { start: self.instance_values.len() as u32, len: 0 };
+        self.sprites.push(draw);
+        InstanceParams { values: &mut self.instance_values, span: &mut self.sprites.last_mut().unwrap().params }
+    }
+
     /// Draw `text`. Chain [`with`](InstanceParams::with) to set the text
     /// shader's `struct Instance` fields (shared by all its glyphs).
     pub fn draw_text(&mut self, mut draw: TextDraw, text: &str) -> InstanceParams<'_> {
@@ -172,8 +185,9 @@ impl RenderWorld {
 }
 
 /// Sets per-instance parameters of the draw just added. Returned by
-/// [`RenderWorld::draw_mesh`], [`RenderWorld::draw_skinned`] and
-/// [`RenderWorld::draw_text`]; ignoring it is fine (the instance then gets zeros).
+/// [`RenderWorld::draw_mesh`], [`RenderWorld::draw_skinned`],
+/// [`RenderWorld::draw_sprite`] and [`RenderWorld::draw_text`]; ignoring it
+/// is fine (the instance then gets zeros).
 pub struct InstanceParams<'w> {
     values: &'w mut Vec<(ParamName, ParamValue)>,
     span: &'w mut Span,

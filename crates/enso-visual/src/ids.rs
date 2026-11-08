@@ -75,6 +75,11 @@ define_id!(
     TextShaderId
 );
 define_id!(
+    /// A sprite shader, from
+    /// [`Renderer::create_sprite_shader`](crate::Renderer::create_sprite_shader).
+    SpriteShaderId
+);
+define_id!(
     /// A material (shader + textures + knobs), from
     /// [`Renderer::create_material`](crate::Renderer::create_material).
     MaterialId
