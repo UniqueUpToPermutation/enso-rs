@@ -1,0 +1,10 @@
+[package]
+name = "enso-core"
+description = "Plain data types shared by every enso crate: timestamps, MIDI events."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Deliberately no dependencies: every other crate depends on this one, so it
+# should build in a second and never drag anything in.
+[dependencies]

@@ -5,8 +5,8 @@
 ```
 enso/
 ├── crates/
-│   ├── enso-core/    shared plain types: events, timestamps, IDs, messages (few deps)
-│   ├── enso-io/      MIDI in/out (midir), asset loading/decoding, file watching
+│   ├── enso-core/    shared plain types: Clock/Timestamp, MIDI messages  ← exists (no deps)
+│   ├── enso-io/      MIDI in/out (midir) ← exists; asset loading, file watching planned
 │   ├── enso-audio/   cpal output stream, synth/DSP, real-time-safe queues
 │   ├── enso-visual/  wgpu renderer                                  ← exists
 │   ├── enso-engine/  bevy_ecs world + systems; bridges io/audio/visual
@@ -21,7 +21,7 @@ about the ECS.
 ## Threads and data flow
 
 ```
-MIDI callback thread ──(crossbeam channel)──▶ ECS / simulation (fixed tick, 120-240 Hz intended)
+MIDI callback thread ──(mpsc channel)──────▶ ECS / simulation (fixed tick, 120-240 Hz intended)
         │                                          │                  │
         │ (lock-free ring buffer, lowest latency)  │ commands (rtrb)  │ RenderWorld per tick
         ▼                                          ▼                  ▼
@@ -31,6 +31,8 @@ MIDI callback thread ──(crossbeam channel)──▶ ECS / simulation (fixed 
 
 - Notes go straight from MIDI to audio for latency, and are copied to the
   ECS for visuals and logic.
+- One `enso_core::Clock` is created at startup and shared by every thread;
+  events are stamped on arrival (see [enso-io.md](enso-io.md)).
 - Events carry high-resolution timestamps. Don't quantise; the player
   doesn't play to a fixed grid. Rhythm, if needed, is *derived* from what
   they play.

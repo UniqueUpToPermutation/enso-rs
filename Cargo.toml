@@ -14,6 +14,8 @@ license = "MIT OR Apache-2.0"
 # Every external dependency is versioned once, here. Member crates opt in with
 # `wgpu.workspace = true`. Keep wgpu/winit aligned with what egui-wgpu expects.
 [workspace.dependencies]
+enso-core = { path = "crates/enso-core" }
+enso-io = { path = "crates/enso-io" }
 enso-visual = { path = "crates/enso-visual" }
 
 wgpu = "30.0"
@@ -27,6 +29,11 @@ env_logger = "0.11"
 # Text: font parsing and multi-channel signed distance field generation.
 ttf-parser = "0.25"
 fdsm = "0.8"
+# MIDI devices (WinMM on Windows, CoreMIDI, ALSA).
+midir = "0.10"
+# Lock-free single-producer/single-consumer ring buffer: the only way data may
+# reach the audio thread, which must never wait on a lock.
+rtrb = "0.3"
 # PNG only: the full default feature set compiles a dozen codecs.
 image = { version = "0.25", default-features = false, features = ["png"] }
 

@@ -130,6 +130,22 @@ globals**: existing goldens were unchanged. `Camera` is screen-aligned
 (uses the camera's right/up vectors). `uv_rect` is not interpolated, so
 sprite-sheet frames cut cleanly.
 
+**2026-11-08: Audio direction: enso hosts plugins (VST3 first) behind a
+MIDI routing graph.** (Owner's answers from the audio brainstorm.) Sound
+comes from VSTs (Massive / Massive X ship VST3, not CLAP). A sequencer
+with several MIDI output channels feeds both instruments and visuals.
+Patches must be rewireable mid-performance, and some visuals will take
+audio input. Owner chose to build enso-core + enso-io first.
+
+**2026-11-08: enso-core and enso-io created; MIDI events are stamped on
+arrival with one shared `Clock`.** `Timestamp` is u64 nanoseconds (not
+`Instant`), so it's plain, testable data. midir's timestamps have a per-port
+origin, so they're ignored. `MidiSink` abstracts the destination (mpsc for
+the sim, rtrb for audio). `MidiInputs` reconnects hot-plugged devices and
+keeps `PortId`s stable by device name. The `notes` example plays from live
+MIDI via dev-dependencies, while its golden test keeps the scripted melody
+(image unchanged). The owner's branch is now `main` (renamed from `master`).
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.

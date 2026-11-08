@@ -1,0 +1,16 @@
+[package]
+name = "enso-io"
+description = "enso's connection to the outside world: MIDI devices (and, later, asset loading)."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+enso-core.workspace = true
+log.workspace = true
+midir.workspace = true
+rtrb.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true

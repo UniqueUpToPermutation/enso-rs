@@ -18,6 +18,10 @@ ttf-parser.workspace = true
 wgpu.workspace = true
 
 [dev-dependencies]
+# Examples only (the `notes` example plays from MIDI). The library itself
+# doesn't depend on its sibling crates.
+enso-core.workspace = true
+enso-io.workspace = true
 env_logger.workspace = true
 winit.workspace = true
 

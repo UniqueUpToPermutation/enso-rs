@@ -13,16 +13,20 @@ behind Rust/Cargo choices briefly when you make them.
 | Crate | State |
 |---|---|
 | `crates/enso-visual` | Working: wgpu renderer with sky, static mesh, skinned mesh, sprite/billboard and MSDF text subrenderers, named shader parameters, interpolated `RenderWorld` API, examples with golden tests |
-| `enso-core`, `enso-io`, `enso-audio`, `enso-engine`, `enso-ui`, `enso` (bin) | Planned, not created yet. See [architecture](docs/agents/architecture.md) |
+| `crates/enso-core` | Working: `Clock`/`Timestamp`, MIDI message types (parse/encode) |
+| `crates/enso-io` | Working: hot-pluggable timestamped MIDI inputs, MIDI output. Asset loading planned |
+| `enso-audio`, `enso-engine`, `enso-ui`, `enso` (bin) | Planned, not created yet. See [architecture](docs/agents/architecture.md) |
 
 ## Commands
 
 ```sh
 cargo check                                         # fast type-check, use constantly
 cargo clippy --all-targets                          # keep it warning-free
-cargo test -p enso-visual                           # unit tests + headless golden-image test per example
+cargo test --workspace                              # unit tests + headless golden-image test per example
 cargo xtask golden                                  # review golden-image failures, accept new images
 cargo run -p enso-visual --example static_mesh      # windowed demo; Space toggles interpolation
+cargo run -p enso-visual --example notes            # plays from any MIDI input
+cargo run -p enso-io --example midi_monitor         # print incoming MIDI
 cargo doc -p enso-visual --no-deps --open           # browse the public API
 ```
 
@@ -48,15 +52,16 @@ cargo doc -p enso-visual --no-deps --open           # browse the public API
 - **Nothing on the live path may panic on user input.** Shader compile
   errors return `RenderError`; missing resources are skipped silently.
 - **The audio thread (future) must never allocate, lock, or block.**
-- **Never work directly on `master`.** Before changing any file, create a
+- **Never work directly on `main`.** Before changing any file, create a
   branch for the task (`git switch -c <type>/<short-topic>`, e.g.
-  `feat/particle-subrenderer`). Don't merge, rebase onto, or push `master`
+  `feat/particle-subrenderer`). Don't merge, rebase onto, or push `main`
   yourself; the owner merges. See [workflow.md](docs/agents/workflow.md#git).
 
 ## Wiki (read the relevant page before working in that area)
 
 - [architecture.md](docs/agents/architecture.md): whole-system design, planned crates, threading
 - [enso-visual.md](docs/agents/enso-visual.md): renderer internals, frame flow, adding a subrenderer
+- [enso-io.md](docs/agents/enso-io.md): enso-core types (clock, MIDI), MIDI devices, event-to-sim time
 - [dependency-notes.md](docs/agents/dependency-notes.md): API gotchas in wgpu 30 / glam 0.34 / winit 0.30
 - [workflow.md](docs/agents/workflow.md): verifying changes, Windows shell quirks, git conventions
 - [decisions.md](docs/agents/decisions.md): decision log with reasons; append to it
