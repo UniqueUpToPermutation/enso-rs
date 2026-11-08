@@ -1,0 +1,19 @@
+[package]
+name = "enso-audio"
+description = "enso's audio engine: a rewireable graph of nodes, run on the real-time audio thread."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+cpal.workspace = true
+crossbeam-queue.workspace = true
+enso-core.workspace = true
+log.workspace = true
+rtrb.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+assert_no_alloc.workspace = true
+enso-io.workspace = true
+env_logger.workspace = true

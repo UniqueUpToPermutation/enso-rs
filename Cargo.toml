@@ -16,6 +16,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 enso-core = { path = "crates/enso-core" }
 enso-io = { path = "crates/enso-io" }
+enso-audio = { path = "crates/enso-audio" }
 enso-visual = { path = "crates/enso-visual" }
 
 wgpu = "30.0"
@@ -30,10 +31,17 @@ env_logger = "0.11"
 ttf-parser = "0.25"
 fdsm = "0.8"
 # MIDI devices (WinMM on Windows, CoreMIDI, ALSA).
-midir = "0.10"
+midir = "0.11"
 # Lock-free single-producer/single-consumer ring buffer: the only way data may
 # reach the audio thread, which must never wait on a lock.
 rtrb = "0.3"
+# Bounded lock-free multi-producer queue: MIDI from any number of input
+# threads into the audio thread.
+crossbeam-queue = "0.3"
+# Audio devices on every desktop OS (WASAPI, CoreAudio, ALSA/PipeWire).
+cpal = "0.18"
+# Tests only: abort if the audio path allocates.
+assert_no_alloc = "1.1"
 # PNG only: the full default feature set compiles a dozen codecs.
 image = { version = "0.25", default-features = false, features = ["png"] }
 

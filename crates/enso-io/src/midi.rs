@@ -28,9 +28,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::mpsc,
+    sync::{Arc, mpsc},
 };
 
+use crossbeam_queue::ArrayQueue;
 use enso_core::{Clock, MidiEvent, MidiMessage, PortId};
 
 /// The client name other MIDI software sees for us.
@@ -57,6 +58,7 @@ pub enum MidiError {
 /// * `std::sync::mpsc::Sender<MidiEvent>`: to the simulation (or any thread);
 /// * `rtrb::Producer<MidiEvent>`: a lock-free ring buffer, for the audio
 ///   thread (which may never wait). Events are dropped if it's full;
+/// * `Arc<ArrayQueue<MidiEvent>>`: the audio engine's lock-free MIDI queue;
 /// * `(A, B)`: both, e.g. audio *and* visuals;
 /// * [`FnSink`]: any closure.
 pub trait MidiSink: Send + 'static {
@@ -74,6 +76,16 @@ impl MidiSink for rtrb::Producer<MidiEvent> {
     fn send(&mut self, event: MidiEvent) {
         if self.push(event).is_err() {
             log::warn!("MIDI ring buffer full: dropped {}", event.message);
+        }
+    }
+}
+
+/// The audio engine's MIDI queue (`enso_audio::MidiQueue`): lock-free, and
+/// `Clone`, so every input can feed it directly. Drops events when full.
+impl MidiSink for Arc<ArrayQueue<MidiEvent>> {
+    fn send(&mut self, event: MidiEvent) {
+        if self.push(event).is_err() {
+            log::warn!("MIDI queue full: dropped {}", event.message);
         }
     }
 }

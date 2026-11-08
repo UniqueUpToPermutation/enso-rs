@@ -146,6 +146,21 @@ keeps `PortId`s stable by device name. The `notes` example plays from live
 MIDI via dev-dependencies, while its golden test keeps the scripted melody
 (image unchanged). The owner's branch is now `main` (renamed from `master`).
 
+**2026-11-08: enso-audio: engine/processor split, persistent nodes,
+swappable compiled schedules.** The control side compiles a `Patch` into a
+`Schedule` with every buffer preallocated and sends it through rtrb. The
+audio side swaps it between buffers and sends the old one back to be
+freed. Nodes live in a slot table and survive rewiring, so plugin state
+won't be lost. MIDI arrives through a lock-free `ArrayQueue` (multi-producer,
+so every input feeds it directly) and is placed sample-accurately, one
+buffer late (jitter-free rather than quantised to buffers). Panicking nodes
+are switched off, and output is clipped and NaN-guarded. `assert_no_alloc`
+enforces the no-allocation rule in tests. Stereo planar buses only for now.
+midir moved to 0.11 because midir 0.10 and cpal 0.18 linked different
+versions of the ALSA library (Cargo allows one `links` per native
+library, even for other platforms' dependencies). **The project must stay
+platform-agnostic** (owner's requirement).
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.
