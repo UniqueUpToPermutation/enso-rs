@@ -11,8 +11,9 @@ enso/
 │   ├── enso-plugin/  (planned) VST3 hosting behind a safe API; plugins become audio nodes
 │   ├── enso-visual/  wgpu renderer                                  ← exists
 │   ├── enso-engine/  bevy_ecs world + systems; bridges io/audio/visual
-│   └── enso-ui/      egui panels (MIDI learn, parameters)
-└── enso/             binary: owns winit window(s) + main loop, wires everything
+│   ├── enso-ui/      egui panels: PatchEditor (egui-snarl)  ← exists
+│   └── enso/         binary: eframe app, owns the window + main loop, wires everything  ← exists
+└── third_party/      vendored crates ported to our egui version
 ```
 
 Dependencies only point downward: `enso` → `enso-engine`/`enso-ui` →

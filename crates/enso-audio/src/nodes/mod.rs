@@ -1,7 +1,9 @@
 //! Built-in nodes.
 
+mod effects;
 mod test_synth;
 
+pub use effects::{Delay, Gain, LowPass, Transpose};
 pub use test_synth::TestSynth;
 
 use crate::{Node, Process};

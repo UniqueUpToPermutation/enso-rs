@@ -1,0 +1,26 @@
+# Vendored egui-snarl 0.12.0 (https://github.com/zakarumych/egui-snarl,
+# commit 23e7489), MIT OR Apache-2.0, ported from egui 0.36 to egui 0.37.
+# See third_party/README.md. Examples and dev-dependencies were dropped.
+[package]
+name = "egui-snarl"
+version = "0.12.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Node-graphs for egui (vendored for egui 0.37)"
+repository = "https://github.com/zakarumych/egui-snarl"
+publish = false
+
+[features]
+serde = ["dep:serde", "egui/serde", "slab/serde"]
+
+[dependencies]
+ahash = { version = "0.8.12", default-features = false }
+egui.workspace = true
+egui-scale = { path = "../egui-scale" }
+serde = { version = "1", features = ["derive"], optional = true }
+slab = "0.4"
+smallvec = { version = "1.15", features = ["const_new"] }
+
+# Third-party code: don't hold it to our lint settings.
+[lints.rust]
+warnings = "allow"

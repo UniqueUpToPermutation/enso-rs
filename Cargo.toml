@@ -18,8 +18,15 @@ enso-core = { path = "crates/enso-core" }
 enso-io = { path = "crates/enso-io" }
 enso-audio = { path = "crates/enso-audio" }
 enso-visual = { path = "crates/enso-visual" }
+enso-ui = { path = "crates/enso-ui" }
+# Vendored and ported to egui 0.37 (see third_party/README.md).
+egui-snarl = { path = "third_party/egui-snarl" }
 
 wgpu = "30.0"
+# egui 0.37: the version whose egui-wgpu uses wgpu 30 (our renderer's).
+# eframe's default features use the wgpu backend.
+egui = "0.37"
+eframe = "0.37"
 winit = "0.30"
 glam = { version = "0.34", features = ["bytemuck"] }
 bytemuck = { version = "1.25", features = ["derive"] }

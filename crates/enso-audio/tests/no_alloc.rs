@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
 use enso_audio::{
-    AudioConfig, AudioEngine, BlockEvent, MidiFrom, Patch, Process,
-    nodes::{FnNode, TestSynth},
+    AudioConfig, AudioEngine, BlockEvent, MidiFrom, Patch, Process, SharedParam,
+    nodes::{Delay, FnNode, Gain, LowPass, TestSynth, Transpose},
 };
 use enso_core::{Channel, MidiEvent, MidiMessage, PortId, Timestamp};
 
@@ -30,8 +30,26 @@ fn the_audio_path_never_allocates() {
             }
         }))
         .unwrap();
+    // The effects, with knobs turned while it plays.
+    let shift = SharedParam::new(0.0);
+    let cutoff = SharedParam::new(1_000.0);
+    let delay_time = SharedParam::new(0.3);
+    let transpose = engine.add_node(Transpose::new(shift.clone())).unwrap();
+    let filter = engine.add_node(LowPass::new(config, cutoff.clone(), SharedParam::new(0.5))).unwrap();
+    let delay = engine
+        .add_node(Delay::new(config, delay_time.clone(), SharedParam::new(0.5), SharedParam::new(0.4)))
+        .unwrap();
+    let gain = engine.add_node(Gain::new(config, SharedParam::new(-6.0))).unwrap();
+
     let mut patch = Patch::new();
-    patch.midi(MidiFrom::inputs(), echo).midi(MidiFrom::Node(echo), synth).output(synth);
+    patch
+        .midi(MidiFrom::inputs(), echo)
+        .midi(MidiFrom::Node(echo), transpose)
+        .midi(MidiFrom::Node(transpose), synth)
+        .audio(synth, filter)
+        .audio(filter, delay)
+        .audio(delay, gain)
+        .output(gain);
     engine.set_patch(patch.clone()).unwrap();
 
     let midi = engine.midi_queue();
@@ -54,6 +72,9 @@ fn the_audio_path_never_allocates() {
             let bend = MidiMessage::PitchBend { channel, value: (i as i16 * 50) % 8000 };
             midi.push(MidiEvent { time: now, port: PortId(0), message: bend }).unwrap();
         }
+        shift.set((i % 13) as f32 - 6.0);
+        cutoff.set(200.0 + 50.0 * (i % 100) as f32);
+        delay_time.set(0.05 + 0.005 * (i % 50) as f32);
         // Control-thread work, interleaved (it may allocate: not on the audio thread).
         match i {
             100 => engine.set_patch(patch.clone()).unwrap(),

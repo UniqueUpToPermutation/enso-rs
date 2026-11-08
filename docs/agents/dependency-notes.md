@@ -12,7 +12,22 @@ instead of guessing.
 | winit | 0.30 | Required by egui-wgpu 0.37 (0.31 is beta) |
 | glam | 0.34 (`bytemuck` feature) | |
 | bytemuck | 1 (`derive`) | Pod structs for GPU buffers |
-| egui / egui-wgpu / egui-winit | 0.37 (planned) | Must match wgpu 30 / winit 0.30 |
+| egui / eframe | 0.37 | Must match wgpu 30 / winit 0.30. eframe's default features use the wgpu backend |
+| egui-snarl / egui-scale | 0.12 / 0.6 (vendored in `third_party/`) | Upstream is on egui 0.36; see `third_party/README.md` |
+| cpal | 0.18 | |
+| midir | 0.11 | 0.10 linked an older ALSA than cpal 0.18 (`links` conflict) |
+
+## egui 0.37 / eframe 0.37 API facts (verified)
+
+- `eframe::App` has `fn ui(&mut self, ui: &mut egui::Ui, frame)` (plus an
+  optional `logic`), not `update(ctx, frame)`.
+- Panels: `egui::Panel::top(id)`, `Panel::bottom(id)` and
+  `CentralPanel::default()`, each with `.show(ui, |ui| ..)` (`show_inside`
+  is deprecated).
+- `ui.close()` closes the enclosing menu/popup.
+- egui-snarl's `SnarlViewer::show_input`/`show_output` must return
+  `impl SnarlPin + 'static`. Returning `PinInfo` directly triggers the
+  `refining_impl_trait` warning.
 
 ## wgpu 30 API facts (verified)
 

@@ -39,12 +39,14 @@ mod device;
 mod engine;
 mod node;
 pub mod nodes;
+mod param;
 mod patch;
 mod processor;
 
 pub use device::{AudioStream, DeviceError, OutputDevice, output_device_names};
 pub use engine::{AudioEngine, EngineError, MidiQueue, NodeId, Stats};
 pub use node::{BlockEvent, CHANNELS, EventOutput, Node, Process};
+pub use param::{SharedParam, Smoothed};
 pub use patch::{MidiFilter, MidiFrom, Patch};
 pub use processor::Processor;
 

@@ -16,7 +16,10 @@ behind Rust/Cargo choices briefly when you make them.
 | `crates/enso-core` | Working: `Clock`/`Timestamp`, MIDI message types (parse/encode) |
 | `crates/enso-io` | Working: hot-pluggable timestamped MIDI inputs, MIDI output. Asset loading planned |
 | `crates/enso-audio` | Working: rewireable node graph on the real-time thread, sample-accurate MIDI, cpal output, test synth, offline rendering, no-alloc test |
-| `enso-engine`, `enso-ui`, `enso` (bin) | Planned, not created yet. See [architecture](docs/agents/architecture.md) |
+| `crates/enso-ui` | Working: `PatchEditor` (egui-snarl node graph, applied to the audio engine live) |
+| `crates/enso` (bin) | Working: eframe app with the patch editor, audio output and MIDI |
+| `enso-engine` (ECS), `enso-plugin` (VST3) | Planned, not created yet. See [architecture](docs/agents/architecture.md) |
+| `third_party/` | Vendored egui-snarl + egui-scale, ported to egui 0.37. See its README |
 
 ## Commands
 
@@ -29,13 +32,17 @@ cargo run -p enso-visual --example static_mesh      # windowed demo; Space toggl
 cargo run -p enso-visual --example notes            # plays from any MIDI input
 cargo run -p enso-io --example midi_monitor         # print incoming MIDI
 cargo run -p enso-audio --example play              # play the test synth from MIDI
+cargo run -p enso                                   # the app: patch editor + audio + MIDI
 cargo doc -p enso-visual --no-deps --open           # browse the public API
 ```
 
 ## Rules that are easy to break
 
-- **Versions are pinned to match `egui-wgpu`** (wgpu 30, winit 0.30). Don't
-  bump wgpu or winit independently, and don't use winit 0.31 (beta).
+- **Versions are pinned to match `egui-wgpu`** (egui/eframe 0.37, wgpu 30,
+  winit 0.30). Don't bump wgpu or winit independently, and don't use winit
+  0.31 (beta). An egui widget crate on another egui version must be
+  vendored and ported into `third_party/` (see its README), not added
+  alongside.
 - **Every dependency version lives in the root `Cargo.toml`
   `[workspace.dependencies]`.** Member crates use `dep.workspace = true`.
 - **`enso-visual` must not depend on winit** (dev-dependency for examples
@@ -70,6 +77,7 @@ cargo doc -p enso-visual --no-deps --open           # browse the public API
 - [enso-visual.md](docs/agents/enso-visual.md): renderer internals, frame flow, adding a subrenderer
 - [enso-io.md](docs/agents/enso-io.md): enso-core types (clock, MIDI), MIDI devices, event-to-sim time
 - [enso-audio.md](docs/agents/enso-audio.md): engine/processor split, patches, real-time rules, timing
+- [enso-ui.md](docs/agents/enso-ui.md): patch editor (graph → engine sync), the enso app, adding node kinds
 - [dependency-notes.md](docs/agents/dependency-notes.md): API gotchas in wgpu 30 / glam 0.34 / winit 0.30
 - [workflow.md](docs/agents/workflow.md): verifying changes, Windows shell quirks, git conventions
 - [decisions.md](docs/agents/decisions.md): decision log with reasons; append to it

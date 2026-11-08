@@ -1,0 +1,13 @@
+[package]
+name = "enso-ui"
+description = "egui panels for enso: the patch editor."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+egui-snarl.workspace = true
+enso-audio.workspace = true
+enso-core.workspace = true
+log.workspace = true

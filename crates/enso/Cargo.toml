@@ -1,0 +1,15 @@
+[package]
+name = "enso"
+description = "The enso app: patch editor, audio engine and MIDI in one window."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+eframe.workspace = true
+enso-audio.workspace = true
+enso-core.workspace = true
+enso-io.workspace = true
+enso-ui.workspace = true
+env_logger.workspace = true
+log.workspace = true

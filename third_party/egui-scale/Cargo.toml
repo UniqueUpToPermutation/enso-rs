@@ -1,0 +1,17 @@
+# Vendored egui-scale 0.6.1 (https://github.com/zakarumych/egui-scale),
+# MIT OR Apache-2.0, ported from egui 0.36 to egui 0.37. A dependency of
+# egui-snarl. See third_party/README.md.
+[package]
+name = "egui-scale"
+version = "0.6.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Egui scaling library (vendored for egui 0.37)"
+repository = "https://github.com/zakarumych/egui-scale"
+publish = false
+
+[dependencies]
+egui.workspace = true
+
+[lints.rust]
+warnings = "allow"

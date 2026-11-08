@@ -161,6 +161,18 @@ versions of the ALSA library (Cargo allows one `links` per native
 library, even for other platforms' dependencies). **The project must stay
 platform-agnostic** (owner's requirement).
 
+**2026-11-08: Patch editor with egui-snarl, vendored for egui 0.37; app
+on eframe.** (Owner asked for a node-graph companion with
+egui-graph-edit. That crate is on egui 0.35, so the owner chose
+egui-snarl, on egui 0.36.) egui-snarl and its dependency egui-scale are
+vendored in `third_party/` with egui bumped to 0.37; both compiled
+unchanged. The app uses eframe 0.37: it shares wgpu 30/winit 0.30 with the
+renderer and saves the window/surface boilerplate. Rendering visuals into
+the same window later goes through eframe's wgpu render state. Knobs are
+`SharedParam` atomics read by nodes and smoothed there: the first step
+towards a general parameter system. New audio nodes: Gain, LowPass (TPT
+SVF), Delay, Transpose (MIDI).
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.
