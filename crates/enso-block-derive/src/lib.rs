@@ -1,0 +1,198 @@
+//! `#[derive(Ports)]`: generates `enso_block::Ports::register_ports` from a
+//! block struct's annotated fields. Documented on the re-export,
+//! `enso_block::Ports`.
+
+use proc_macro::TokenStream;
+use proc_macro2::{Span, TokenStream as Tokens};
+use quote::{quote, quote_spanned};
+use syn::{
+    Data, DeriveInput, Expr, Field, Fields, Ident, LitStr, Type, parse_macro_input, spanned::Spanned,
+};
+
+#[proc_macro_derive(Ports, attributes(input, output, child, private))]
+pub fn derive_ports(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand(&input) {
+        Ok(tokens) => tokens.into(),
+        // Errors become `compile_error!`s pointing at the offending code.
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// What a field's attribute asks for.
+enum Kind {
+    Input { default: Option<Expr>, merge: Option<Ident> },
+    Output { initial: Option<Expr> },
+    Child { init: Option<Expr> },
+}
+
+struct PortField {
+    ident: Ident,
+    name: String,
+    kind: Kind,
+    private: bool,
+    span: Span,
+}
+
+fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
+    let fields = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => fields.named.iter().collect::<Vec<_>>(),
+            Fields::Unit => Vec::new(),
+            Fields::Unnamed(_) => {
+                return Err(syn::Error::new(input.span(), "#[derive(Ports)] needs named fields (or none)"));
+            }
+        },
+        _ => return Err(syn::Error::new(input.span(), "#[derive(Ports)] works on structs only")),
+    };
+
+    // Report every bad field at once, not just the first.
+    let mut ports = Vec::new();
+    let mut errors: Option<syn::Error> = None;
+    for field in fields {
+        match parse_field(field) {
+            Ok(Some(port)) => ports.push(port),
+            Ok(None) => {}
+            Err(err) => match &mut errors {
+                Some(errors) => errors.combine(err),
+                None => errors = Some(err),
+            },
+        }
+    }
+    if let Some(errors) = errors {
+        return Err(errors);
+    }
+
+    let statements = ports.iter().map(|port| {
+        let PortField { ident, name, span, .. } = port;
+        let register = match &port.kind {
+            Kind::Input { default, merge: None } => {
+                let default = or_default(default);
+                quote_spanned! {*span=> self.#ident = r.input(#name, #default); }
+            }
+            Kind::Input { default, merge: Some(mode) } => {
+                let default = or_default(default);
+                quote_spanned! {*span=>
+                    self.#ident = r.input_merged(#name, #default, ::enso_block::MergeMode::#mode);
+                }
+            }
+            Kind::Output { initial } => {
+                let initial = or_default(initial);
+                quote_spanned! {*span=> self.#ident = r.output(#name, #initial); }
+            }
+            Kind::Child { init } => {
+                let init = or_default(init);
+                quote_spanned! {*span=> self.#ident = r.child(#name, #init); }
+            }
+        };
+        let private = port.private.then(|| quote_spanned! {*span=> r.private(self.#ident); });
+        quote! { #register #private }
+    });
+
+    let ident = &input.ident;
+    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
+    Ok(quote! {
+        impl #impl_generics ::enso_block::Ports for #ident #type_generics #where_clause {
+            fn register_ports(&mut self, r: &mut ::enso_block::Registrar<'_>) {
+                let _ = &r; // silence "unused" for blocks without annotated fields
+                #(#statements)*
+            }
+        }
+    })
+}
+
+/// `default = expr` if given, else the type's `Default`.
+fn or_default(expr: &Option<Expr>) -> Tokens {
+    match expr {
+        Some(expr) => quote! { #expr },
+        None => quote! { ::core::default::Default::default() },
+    }
+}
+
+/// Read a field's `#[input(..)]` / `#[output(..)]` / `#[child(..)]` /
+/// `#[private]`. `None` for fields without any (plain block state).
+fn parse_field(field: &Field) -> syn::Result<Option<PortField>> {
+    let ident = field.ident.clone().expect("named fields");
+    let mut name = ident.to_string();
+    let mut kind = None;
+    let mut private = false;
+
+    for attr in &field.attrs {
+        let which = if attr.path().is_ident("input") {
+            "input"
+        } else if attr.path().is_ident("output") {
+            "output"
+        } else if attr.path().is_ident("child") {
+            "child"
+        } else if attr.path().is_ident("private") {
+            private = true;
+            continue;
+        } else {
+            continue;
+        };
+        if kind.is_some() {
+            return Err(syn::Error::new(attr.span(), "a field can be only one of input, output or child"));
+        }
+
+        let (mut value, mut merge) = (None, None);
+        // `#[input]` alone has no arguments; `#[input(..)]` has some.
+        if matches!(attr.meta, syn::Meta::List(_)) {
+            attr.parse_nested_meta(|meta| {
+                let key = meta.path.get_ident().map(Ident::to_string).unwrap_or_default();
+                match (which, key.as_str()) {
+                    (_, "name") => name = meta.value()?.parse::<LitStr>()?.value(),
+                    ("input", "default") | ("output", "initial") | ("child", "init") => {
+                        value = Some(meta.value()?.parse::<Expr>()?);
+                    }
+                    ("input", "merge") => {
+                        let mode: Ident = meta.value()?.parse()?;
+                        if !["Single", "Append", "Sum"].contains(&mode.to_string().as_str()) {
+                            return Err(meta.error("merge must be Single, Append or Sum"));
+                        }
+                        merge = Some(mode);
+                    }
+                    _ => {
+                        let allowed = match which {
+                            "input" => "name, default, merge",
+                            "output" => "name, initial",
+                            _ => "name, init",
+                        };
+                        return Err(meta.error(format!("unknown argument for #[{which}]; expected {allowed}")));
+                    }
+                }
+                Ok(())
+            })?;
+        }
+
+        // Catch "wrong handle type" here, with a clear message, rather than
+        // as a type error inside generated code.
+        let expected = match which {
+            "input" => "In",
+            "output" => "Out",
+            _ => "Child",
+        };
+        if outer_type_name(&field.ty).as_deref() != Some(expected) {
+            return Err(syn::Error::new(field.ty.span(), format!("#[{which}] fields must have type {expected}<..>")));
+        }
+
+        kind = Some(match which {
+            "input" => Kind::Input { default: value, merge },
+            "output" => Kind::Output { initial: value },
+            _ => Kind::Child { init: value },
+        });
+    }
+
+    match kind {
+        Some(kind) => Ok(Some(PortField { ident, name, kind, private, span: field.span() })),
+        None if private => Err(syn::Error::new(field.span(), "#[private] goes with #[input] or #[output]")),
+        None => Ok(None),
+    }
+}
+
+/// `In` for `In<f32>` or `enso_block::In<f32>`.
+fn outer_type_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(path) => path.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+}

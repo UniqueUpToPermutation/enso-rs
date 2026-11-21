@@ -1,0 +1,17 @@
+[package]
+name = "enso-block-derive"
+description = "#[derive(Ports)] for enso-block. Use it through enso_block::Ports."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# A procedural macro is a compiler plugin: Rust requires it to be its own
+# crate of this special type, compiled for the build machine and run while
+# compiling the crates that use it.
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true

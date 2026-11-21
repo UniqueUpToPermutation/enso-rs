@@ -372,6 +372,9 @@ No blocking questions remain for a first implementation. Deferred:
    `private`, aliases, merge modes. Compile a tree into a flat ordered
    graph. Single-threaded `Workstream::step`. Tests with small
    arithmetic blocks.
+   ✅ Plus `#[derive(Ports)]` (owner's request): ports and children
+   declared as annotated fields; `Block::register` became optional and
+   runs after the derived part.
 2. **Mailboxes and the engine:** `Inbox`/`Outbox`, Queue (drop-oldest) and
    Latest policies, `RealtimeMessage`, `Engine` with several workstreams and
    path-based `connect_mail`.

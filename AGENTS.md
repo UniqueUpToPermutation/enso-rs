@@ -16,7 +16,7 @@ behind Rust/Cargo choices briefly when you make them.
 | `crates/enso-core` | Working: `Clock`/`Timestamp`, MIDI message types (parse/encode) |
 | `crates/enso-io` | Working: hot-pluggable timestamped MIDI inputs, MIDI output. Asset loading planned |
 | `crates/enso-audio` | Working: rewireable node graph on the real-time thread, sample-accurate MIDI, cpal output, test synth, offline rendering, no-alloc test |
-| `crates/enso-block` | Step 1 of the block platform: blocks, ports, interfaces, linking, single-threaded `Workstream`. Mailboxes/engine next |
+| `crates/enso-block` (+ `enso-block-derive`) | Step 1 of the block platform: blocks, ports, interfaces, linking, single-threaded `Workstream`, `#[derive(Ports)]`. Mailboxes/engine next |
 | `crates/enso-ui` | Working: `PatchEditor` (egui-snarl node graph, applied to the audio engine live) |
 | `crates/enso` (bin) | Working: eframe app with the patch editor, audio output and MIDI |
 | `enso-engine` (ECS), `enso-plugin` (VST3) | Planned, not created yet. See [architecture](docs/agents/architecture.md) |

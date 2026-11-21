@@ -8,33 +8,37 @@
 //! the blocks it depends on.
 //!
 //! ```
-//! use enso_block::{Block, In, Io, Linker, LinkError, Out, Registrar, Workstream, Child};
+//! use enso_block::{Block, Child, In, Io, LinkError, Linker, Out, Ports, Workstream};
 //!
-//! #[derive(Default)]
-//! struct Constant { value: f32, out: Out<f32> }
-//! impl Block for Constant {
-//!     fn register(&mut self, r: &mut Registrar) { self.out = r.output("out", self.value); }
+//! #[derive(Ports, Default)]
+//! struct Constant {
+//!     value: f32,
+//!     #[output(initial = self.value)]
+//!     out: Out<f32>,
 //! }
+//! impl Block for Constant {}
 //!
-//! #[derive(Default)]
-//! struct Double { input: In<f32>, out: Out<f32> }
+//! #[derive(Ports, Default)]
+//! struct Double {
+//!     #[input(name = "in")]
+//!     input: In<f32>,
+//!     #[output]
+//!     out: Out<f32>,
+//! }
 //! impl Block for Double {
-//!     fn register(&mut self, r: &mut Registrar) {
-//!         self.input = r.input("in", 0.0);
-//!         self.out = r.output("out", 0.0);
-//!     }
 //!     fn process(&mut self, io: &Io) {
 //!         *io.write(self.out) = 2.0 * *io.read(self.input);
 //!     }
 //! }
 //!
-//! #[derive(Default)]
-//! struct Patch { source: Child<Constant>, double: Child<Double> }
+//! #[derive(Ports, Default)]
+//! struct Patch {
+//!     #[child(init = Constant { value: 21.0, ..Default::default() })]
+//!     source: Child<Constant>,
+//!     #[child]
+//!     double: Child<Double>,
+//! }
 //! impl Block for Patch {
-//!     fn register(&mut self, r: &mut Registrar) {
-//!         self.source = r.child("source", Constant { value: 21.0, ..Default::default() });
-//!         self.double = r.child("double", Double::default());
-//!     }
 //!     fn link(&mut self, l: &mut Linker) -> Result<(), LinkError> {
 //!         l.connect(l[self.source].out, l[self.double].input)
 //!     }
@@ -50,7 +54,11 @@ mod build;
 mod merge;
 mod workstream;
 
-pub use block::{Block, BlockError, Child, In, Out, PortHandle};
+pub use block::{Block, BlockError, Child, In, Out, PortHandle, Ports};
+/// `#[derive(Ports)]`; see the [`Ports`](trait@Ports) trait. A derive macro
+/// and a trait may share a name: they live in different namespaces (like
+/// serde's `Serialize`).
+pub use enso_block_derive::Ports;
 pub use build::{BuildError, Direction, Interface, LinkError, Linker, LoadContext, Registrar};
 pub use merge::{Events, Merge, MergeMode, Stamped};
 pub use workstream::{AccessError, Io, Workstream};

@@ -3,17 +3,20 @@
 
 use enso_block::{
     AccessError, Block, BlockError, BuildError, Child, Events, In, Io, LinkError, Linker, LoadContext, MergeMode,
-    Out, Registrar, Stamped, Workstream,
+    Out, Ports, Registrar, Stamped, Workstream,
 };
 use enso_core::Timestamp;
 
 // ---- small blocks -------------------------------------------------------------------
 
-/// Outputs `value` (its `value` input is a knob).
-#[derive(Default)]
+/// Outputs `value` (its `value` input is a knob). The default comes from
+/// `self`: the derive's code runs inside a method.
+#[derive(Ports, Default)]
 struct Constant {
     initial: f32,
+    #[input(default = self.initial)]
     value: In<f32>,
+    #[output]
     out: Out<f32>,
 }
 
@@ -24,73 +27,66 @@ impl Constant {
 }
 
 impl Block for Constant {
-    fn register(&mut self, r: &mut Registrar) {
-        self.value = r.input("value", self.initial);
-        self.out = r.output("out", 0.0);
-    }
     fn process(&mut self, io: &Io) {
         *io.write(self.out) = *io.read(self.value);
     }
 }
 
 /// out = a + b (both knobs when unconnected).
-#[derive(Default)]
+#[derive(Ports, Default)]
 struct Add {
+    #[input]
     a: In<f32>,
+    #[input]
     b: In<f32>,
+    #[output]
     out: Out<f32>,
 }
 
 impl Block for Add {
-    fn register(&mut self, r: &mut Registrar) {
-        self.a = r.input("a", 0.0);
-        self.b = r.input("b", 0.0);
-        self.out = r.output("out", 0.0);
-    }
     fn process(&mut self, io: &Io) {
         *io.write(self.out) = *io.read(self.a) + *io.read(self.b);
     }
 }
 
 /// out = in * factor.
-#[derive(Default)]
+#[derive(Ports, Default)]
 struct Scale {
     factor: f32,
+    #[input(name = "in")]
     input: In<f32>,
+    #[output]
     out: Out<f32>,
 }
 
 impl Block for Scale {
-    fn register(&mut self, r: &mut Registrar) {
-        self.input = r.input("in", 0.0);
-        self.out = r.output("out", 0.0);
-    }
     fn process(&mut self, io: &Io) {
         *io.write(self.out) = *io.read(self.input) * self.factor;
     }
 }
 
 /// Sums any number of links into one input (`Sum` merge).
-#[derive(Default)]
+#[derive(Ports, Default)]
 struct Bus {
+    #[input(name = "in", merge = Sum)]
     input: In<f32>,
+    #[output]
     out: Out<f32>,
 }
 
 impl Block for Bus {
-    fn register(&mut self, r: &mut Registrar) {
-        self.input = r.input_merged("in", 0.0, MergeMode::Sum);
-        self.out = r.output("out", 0.0);
-    }
     fn process(&mut self, io: &Io) {
         *io.write(self.out) = *io.read(self.input);
     }
 }
 
-/// A mixer whose number of inputs is configuration (decision 9).
+/// A mixer whose number of inputs is configuration (decision 9): the
+/// fixed output is derived, the variable inputs registered by hand.
+#[derive(Ports)]
 struct Mixer {
     inputs: Vec<In<f32>>,
     count: usize,
+    #[output]
     out: Out<f32>,
 }
 
@@ -103,7 +99,6 @@ impl Mixer {
 impl Block for Mixer {
     fn register(&mut self, r: &mut Registrar) {
         self.inputs = (0..self.count).map(|i| r.input(&format!("in{i}"), 0.0)).collect();
-        self.out = r.output("out", 0.0);
     }
     fn process(&mut self, io: &Io) {
         *io.write(self.out) = self.inputs.iter().map(|&i| *io.read(i)).sum();
@@ -111,16 +106,14 @@ impl Block for Mixer {
 }
 
 /// Keeps state across steps.
-#[derive(Default)]
+#[derive(Ports, Default)]
 struct Counter {
     count: f32,
+    #[output]
     out: Out<f32>,
 }
 
 impl Block for Counter {
-    fn register(&mut self, r: &mut Registrar) {
-        self.out = r.output("out", 0.0);
-    }
     fn process(&mut self, io: &Io) {
         self.count += 1.0;
         *io.write(self.out) = self.count;
@@ -136,7 +129,7 @@ fn a_leaf_runs() {
     assert_eq!(*ws.read::<f32>("out").unwrap(), 4.0);
 }
 
-#[derive(Default)]
+#[derive(Ports, Default)]
 struct TwoAdds {
     first: Child<Add>,
     second: Child<Add>,
@@ -191,17 +184,15 @@ fn state_survives_steps() {
 
 /// A composite with no ports of its own (decision 8): its surface is what
 /// its children float up.
-#[derive(Default)]
+#[derive(Ports, Default)]
 struct Chain {
+    #[child(init = Constant::new(3.0))]
     source: Child<Constant>,
+    #[child(init = Scale { factor: 10.0, ..Default::default() })]
     scale: Child<Scale>,
 }
 
 impl Block for Chain {
-    fn register(&mut self, r: &mut Registrar) {
-        self.source = r.child("source", Constant::new(3.0));
-        self.scale = r.child("scale", Scale { factor: 10.0, ..Default::default() });
-    }
     fn link(&mut self, l: &mut Linker) -> Result<(), LinkError> {
         l.connect(l[self.source].out, l[self.scale].input)
     }
@@ -230,7 +221,7 @@ fn private_hides_and_alias_renames() {
     assert_eq!(paths, ["out", "scale/out", "source/out", "source/value"]);
 }
 
-#[derive(Default)]
+#[derive(Ports, Default)]
 struct PrivateAlias {
     source: Child<Constant>,
     scale: Child<Scale>,
@@ -253,7 +244,7 @@ impl Block for PrivateAlias {
 #[test]
 fn a_parent_can_link_what_its_children_float_up_from_their_children() {
     // Decision 14: the root links `chain/scale/out` (a grandchild's port).
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Root {
         chain: Child<PrivateAlias>,
         add: Child<Add>,
@@ -275,7 +266,7 @@ fn a_parent_can_link_what_its_children_float_up_from_their_children() {
 
 #[test]
 fn private_interfaces_cant_be_linked_from_above() {
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Root {
         chain: Child<PrivateAlias>,
         source: Child<Constant>,
@@ -297,7 +288,7 @@ fn private_interfaces_cant_be_linked_from_above() {
 #[test]
 fn a_parent_cant_link_its_own_ports() {
     // Decision 8: parents wire children to each other, never to themselves.
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Selfish {
         source: Child<Constant>,
         input: In<f32>,
@@ -319,7 +310,7 @@ fn a_parent_cant_link_its_own_ports() {
 
 #[test]
 fn types_are_checked_when_linking_by_path() {
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Mismatch {
         count: Child<Counter>,
         events: Child<EventSink>,
@@ -339,7 +330,7 @@ fn types_are_checked_when_linking_by_path() {
 
 #[test]
 fn single_inputs_take_one_link() {
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Twice {
         a: Child<Constant>,
         b: Child<Constant>,
@@ -362,7 +353,7 @@ fn single_inputs_take_one_link() {
 
 #[test]
 fn cycles_are_rejected() {
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Loop {
         a: Child<Scale>,
         b: Child<Scale>,
@@ -383,7 +374,7 @@ fn cycles_are_rejected() {
 
 #[test]
 fn registration_errors_are_reported() {
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Clash {
         a: Out<f32>,
         b: Out<f32>,
@@ -402,7 +393,7 @@ fn registration_errors_are_reported() {
 
 #[test]
 fn sum_inputs_add_their_links() {
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Summing {
         parts: Vec<Child<Constant>>,
         bus: Child<Bus>,
@@ -436,16 +427,14 @@ impl Stamped for Note {
 }
 
 /// Emits fixed notes.
-#[derive(Default)]
+#[derive(Ports, Default)]
 struct EventSource {
     notes: Vec<u64>,
+    #[output(initial = Events::with_capacity(16))]
     out: Out<Events<Note>>,
 }
 
 impl Block for EventSource {
-    fn register(&mut self, r: &mut Registrar) {
-        self.out = r.output("out", Events::with_capacity(16));
-    }
     fn process(&mut self, io: &Io) {
         let mut out = io.write(self.out);
         out.clear();
@@ -455,21 +444,18 @@ impl Block for EventSource {
     }
 }
 
-#[derive(Default)]
+#[derive(Ports, Default)]
 struct EventSink {
+    #[input(name = "in", default = Events::with_capacity(64), merge = Append)]
     input: In<Events<Note>>,
 }
 
-impl Block for EventSink {
-    fn register(&mut self, r: &mut Registrar) {
-        self.input = r.input_merged("in", Events::with_capacity(64), MergeMode::Append);
-    }
-}
+impl Block for EventSink {}
 
 #[test]
 fn append_inputs_merge_by_timestamp() {
     // Decision 19: Append sorts by time, stably (equal times keep link order).
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Streams {
         a: Child<EventSource>,
         b: Child<EventSource>,
@@ -495,6 +481,7 @@ fn append_inputs_merge_by_timestamp() {
 
 #[test]
 fn merge_modes_must_suit_the_type() {
+    #[derive(Ports)]
     struct BadMerge;
     impl Block for BadMerge {
         fn register(&mut self, r: &mut Registrar) {
@@ -510,7 +497,7 @@ fn merge_modes_must_suit_the_type() {
 
 #[test]
 fn ports_can_depend_on_configuration() {
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Mix {
         mixer: Option<Child<Mixer>>,
         parts: Vec<Child<Constant>>,
@@ -536,6 +523,7 @@ fn ports_can_depend_on_configuration() {
 
 #[test]
 fn load_failures_name_the_block() {
+    #[derive(Ports)]
     struct Missing;
     impl Block for Missing {
         fn register(&mut self, _: &mut Registrar) {}
@@ -543,11 +531,11 @@ fn load_failures_name_the_block() {
             Err(format!("no file for {}", cx.path()).into())
         }
     }
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Root {
         inner: Child<MissingHolder>,
     }
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct MissingHolder;
     impl Block for MissingHolder {
         fn register(&mut self, r: &mut Registrar) {
@@ -565,6 +553,7 @@ fn load_failures_name_the_block() {
 
 #[test]
 fn a_panicking_block_is_switched_off() {
+    #[derive(Ports)]
     struct Faulty {
         out: Out<f32>,
     }
@@ -576,7 +565,7 @@ fn a_panicking_block_is_switched_off() {
             panic!("bug");
         }
     }
-    #[derive(Default)]
+    #[derive(Ports, Default)]
     struct Root {
         faulty: Option<Child<Faulty>>,
         counter: Child<Counter>,
@@ -592,4 +581,60 @@ fn a_panicking_block_is_switched_off() {
     ws.step();
     assert_eq!(ws.disabled().collect::<Vec<_>>(), ["faulty"]);
     assert_eq!(*ws.read::<f32>("counter/out").unwrap(), 2.0);
+}
+
+// ---- #[derive(Ports)] ---------------------------------------------------------------
+
+#[test]
+fn derive_registers_in_field_order_with_names_and_private() {
+    #[derive(Ports, Default)]
+    struct Annotated {
+        #[input(default = 2.0)]
+        gain: In<f32>,
+        #[private]
+        #[input(name = "secret")]
+        hidden: In<f32>,
+        #[output(name = "result", initial = -1.0)]
+        out: Out<f32>,
+        #[child(name = "inner", init = Constant::new(7.0))]
+        constant: Child<Constant>,
+        steps_seen: u32,
+    }
+    impl Block for Annotated {
+        fn process(&mut self, io: &Io) {
+            self.steps_seen += 1;
+            *io.write(self.out) = *io.read(self.gain) * *io.read(self.hidden);
+        }
+    }
+
+    let mut ws = Workstream::build(Annotated::default()).unwrap();
+    let paths: Vec<_> = ws.interfaces().iter().map(|i| i.path.as_str()).collect();
+    // Field order; `secret` is private; the child floats up as `inner/...`.
+    assert_eq!(paths, ["gain", "result", "inner/value", "inner/out"]);
+    assert_eq!(*ws.read::<f32>("result").unwrap(), -1.0, "initial value before the first step");
+    ws.step();
+    assert_eq!(*ws.read::<f32>("result").unwrap(), 0.0, "2.0 × the private knob's default (0.0)");
+    ws.step();
+    assert_eq!(*ws.read::<f32>("inner/out").unwrap(), 7.0);
+}
+
+#[test]
+fn derive_works_on_generic_blocks() {
+    /// Passes any summable value through.
+    #[derive(Ports, Default)]
+    struct Through<T: enso_block::Merge + Default + Copy> {
+        #[input(merge = Sum)]
+        input: In<T>,
+        #[output]
+        out: Out<T>,
+    }
+    impl<T: enso_block::Merge + Default + Copy> Block for Through<T> {
+        fn process(&mut self, io: &Io) {
+            *io.write(self.out) = *io.read(self.input);
+        }
+    }
+    let mut ws = Workstream::build(Through::<f64>::default()).unwrap();
+    ws.set("input", 2.5f64).unwrap();
+    ws.step();
+    assert_eq!(*ws.read::<f64>("out").unwrap(), 2.5);
 }

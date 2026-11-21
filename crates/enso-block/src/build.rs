@@ -104,7 +104,9 @@ impl Build {
         let mut build = Build::default();
         build.blocks.push(BlockEntry::new(String::new(), String::new()));
         let mut root = root;
-        root.register(&mut Registrar { build: &mut build, block: 0 });
+        let mut r = Registrar { build: &mut build, block: 0 };
+        root.register_ports(&mut r);
+        root.register(&mut r);
         build.blocks[0].block = Some(root);
         build.check()?;
 
@@ -240,7 +242,9 @@ impl Registrar<'_> {
         let id = self.build.blocks.len() as u32;
         self.build.blocks.push(BlockEntry::new(name.to_owned(), path));
         self.build.blocks[self.block as usize].children.push(id);
-        block.register(&mut Registrar { build: self.build, block: id });
+        let mut r = Registrar { build: self.build, block: id };
+        block.register_ports(&mut r);
+        block.register(&mut r);
         self.build.blocks[id as usize].block = Some(Box::new(block));
         Child::new(id)
     }

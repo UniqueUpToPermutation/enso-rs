@@ -64,6 +64,28 @@ running, the ECS.
 - Composites without a routine are still visited (a no-op call). That's
   cheap; skip them if profiles ever say otherwise.
 
+## `#[derive(Ports)]` (crate `enso-block-derive`)
+
+`Block: Ports`. Registration runs `register_ports` (generated) and then
+`Block::register` (optional, hand-written). Every block derives `Ports`,
+even with no annotated fields, because `Ports` is a supertrait.
+
+- `#[input(name, default, merge)]` on `In<T>`, `#[output(name, initial)]`
+  on `Out<T>`, `#[child(name, init)]` on `Child<B>`, `#[private]` next to
+  a port. Missing values use `Default::default()`. The expressions run
+  inside `register_ports`, so they may use `self` (`default =
+  self.initial`).
+- Fields register in declaration order. Fields without attributes are
+  plain state.
+- What a derive can't express (ports that depend on configuration, private
+  flags or aliases on *children's* ports via `Registrar::get`) goes in
+  `Block::register`, which runs after the derived part.
+- Generated code names `::enso_block::...`, so the derive only works
+  outside the `enso-block` crate (tests and doctests are outside).
+- The macro checks the handle type of each field (`#[output]` on an `In`
+  is an error) and reports **all** bad fields at once, with spans. It uses
+  syn 2 (also in the tree: syn 3, pulled in by other crates).
+
 ## API notes
 
 - `Registrar::get(child)` reads a child's handles during `register`, to
