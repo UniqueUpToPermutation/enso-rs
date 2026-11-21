@@ -7,15 +7,25 @@ use std::{
 };
 
 use crate::{
-    Block, BlockError, Child, In, Merge, MergeMode, Out, PortHandle,
+    Block, BlockError, Child, Delivery, In, Inbox, Merge, MergeMode, Message, Out, Outbox, PortHandle,
+    mail::{MailFns, mail_fns},
     merge::{ClearFn, MergeFn, clear_erased, merge_erased},
 };
 
-/// Which way data flows through a port.
+/// What an interface is: a port (same-step data flow) or a mailbox end
+/// (messages, across steps and workstreams).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Direction {
+pub enum InterfaceKind {
     In,
     Out,
+    Inbox,
+    Outbox,
+}
+
+impl InterfaceKind {
+    pub fn is_mailbox(self) -> bool {
+        matches!(self, InterfaceKind::Inbox | InterfaceKind::Outbox)
+    }
 }
 
 /// One entry of a block's public dictionary.
@@ -23,7 +33,7 @@ pub enum Direction {
 pub struct Interface {
     /// Relative to the block whose dictionary this is: `filter/cutoff`.
     pub path: String,
-    pub direction: Direction,
+    pub kind: InterfaceKind,
     /// The Rust type carried, for display (`f32`, `enso_block::Events<..>`).
     pub type_name: &'static str,
     pub merge: MergeMode,
@@ -39,7 +49,7 @@ pub enum LinkError {
     UnknownPath(String),
     #[error("{from:?} carries {from_type}, but {to:?} expects {to_type}")]
     TypeMismatch { from: String, from_type: &'static str, to: String, to_type: &'static str },
-    #[error("{0:?} must be an output and {1:?} an input")]
+    #[error("{0:?} → {1:?}: connect an output to an input, or an outbox to an inbox")]
     WrongDirection(String, String),
     #[error("{0:?} accepts only one link (its merge mode is Single)")]
     AlreadyLinked(String),
@@ -57,6 +67,11 @@ pub enum BuildError {
     Link { path: String, source: LinkError },
     #[error("cycle: {} depend on each other (feedback needs a delay block)", .0.join(", "))]
     Cycle(Vec<String>),
+    #[error(
+        "{path:?} sends {type_name} from a real-time workstream; dropping it may free memory \
+         (use a message type that owns no memory)"
+    )]
+    NotRealtimeSafe { path: String, type_name: &'static str },
 }
 
 // ---- build state -------------------------------------------------------------------
@@ -74,10 +89,12 @@ pub(crate) struct BlockEntry {
     pub dictionary: Vec<Interface>,
 }
 
+/// A registered interface: a port or a mailbox end. (Called a "port"
+/// internally either way: they share handles, names and visibility.)
 pub(crate) struct PortEntry {
     pub owner: u32,
     pub name: String,
-    pub direction: Direction,
+    pub kind: InterfaceKind,
     pub type_id: TypeId,
     pub type_name: &'static str,
     pub merge: MergeMode,
@@ -85,8 +102,11 @@ pub(crate) struct PortEntry {
     pub clear: Option<ClearFn>,
     pub merge_fn: Option<MergeFn>,
     /// An output's initial value, or an input's default. Moved into the
-    /// workstream's storage when compiled.
+    /// workstream's storage when compiled. `None` for mailboxes.
     pub value: Option<Box<dyn Any + Send>>,
+    /// For mailbox ends.
+    pub mail: Option<MailFns>,
+    pub delivery: Delivery,
 }
 
 #[derive(Default)]
@@ -95,6 +115,8 @@ pub(crate) struct Build {
     pub ports: Vec<PortEntry>,
     /// (output port, input port)
     pub links: Vec<(u32, u32)>,
+    /// (outbox, inbox) within this tree.
+    pub mail_links: Vec<(u32, u32)>,
     pub errors: Vec<BuildError>,
 }
 
@@ -177,7 +199,7 @@ impl Build {
 
     fn interface(&self, path: String, port: u32) -> Interface {
         let p = &self.ports[port as usize];
-        Interface { path, direction: p.direction, type_name: p.type_name, merge: p.merge, port, type_id: p.type_id }
+        Interface { path, kind: p.kind, type_name: p.type_name, merge: p.merge, port, type_id: p.type_id }
     }
 }
 
@@ -213,7 +235,8 @@ impl Registrar<'_> {
     /// An input that accepts one link. `default` is its value while
     /// unconnected: an unconnected input is a knob.
     pub fn input<T: Send + 'static>(&mut self, name: &str, default: T) -> In<T> {
-        In::new(self.port(name, Direction::In, MergeMode::Single, None, Box::new(default), port_type::<T>()))
+        let entry = PortEntry { value: Some(Box::new(default)), ..PortEntry::new::<T>(InterfaceKind::In) };
+        In::new(self.add(name, entry))
     }
 
     /// An input that merges several links with `mode` (`Sum`, `Append`).
@@ -223,13 +246,35 @@ impl Registrar<'_> {
         if !T::supports(mode) {
             self.error(format!("input {name:?}: {} doesn't support {mode:?}", std::any::type_name::<T>()));
         }
-        let fns = Some((clear_erased::<T> as ClearFn, merge_erased::<T> as MergeFn));
-        In::new(self.port(name, Direction::In, mode, fns, Box::new(default), port_type::<T>()))
+        let entry = PortEntry {
+            value: Some(Box::new(default)),
+            merge: mode,
+            clear: Some(clear_erased::<T> as ClearFn),
+            merge_fn: Some(merge_erased::<T> as MergeFn),
+            ..PortEntry::new::<T>(InterfaceKind::In)
+        };
+        In::new(self.add(name, entry))
     }
 
     /// An output, holding `initial` until the block first writes it.
     pub fn output<T: Send + 'static>(&mut self, name: &str, initial: T) -> Out<T> {
-        Out::new(self.port(name, Direction::Out, MergeMode::Single, None, Box::new(initial), port_type::<T>()))
+        let entry = PortEntry { value: Some(Box::new(initial)), ..PortEntry::new::<T>(InterfaceKind::Out) };
+        Out::new(self.add(name, entry))
+    }
+
+    /// An inbox: receives messages from any number of outboxes, in this
+    /// workstream or others. `delivery`: keep every message (up to a
+    /// capacity, dropping the oldest) or only the latest.
+    pub fn inbox<M: Message>(&mut self, name: &str, delivery: Delivery) -> Inbox<M> {
+        let entry = PortEntry { mail: Some(mail_fns::<M>()), delivery, ..PortEntry::new::<M>(InterfaceKind::Inbox) };
+        Inbox::new(self.add(name, entry))
+    }
+
+    /// An outbox: sends messages to every inbox linked to it (none: they're
+    /// dropped). Never blocks.
+    pub fn outbox<M: Message>(&mut self, name: &str) -> Outbox<M> {
+        let entry = PortEntry { mail: Some(mail_fns::<M>()), ..PortEntry::new::<M>(InterfaceKind::Outbox) };
+        Outbox::new(self.add(name, entry))
     }
 
     /// Add `block` as a child called `name`. It registers right away; its
@@ -272,28 +317,10 @@ impl Registrar<'_> {
         self.build.blocks[self.block as usize].aliases.push((name.to_owned(), port));
     }
 
-    fn port(
-        &mut self,
-        name: &str,
-        direction: Direction,
-        merge: MergeMode,
-        fns: Option<(ClearFn, MergeFn)>,
-        value: Box<dyn Any + Send>,
-        (type_id, type_name): (TypeId, &'static str),
-    ) -> u32 {
+    fn add(&mut self, name: &str, entry: PortEntry) -> u32 {
         self.check_name(name);
         let index = self.build.ports.len() as u32;
-        self.build.ports.push(PortEntry {
-            owner: self.block,
-            name: name.to_owned(),
-            direction,
-            type_id,
-            type_name,
-            merge,
-            clear: fns.map(|f| f.0),
-            merge_fn: fns.map(|f| f.1),
-            value: Some(value),
-        });
+        self.build.ports.push(PortEntry { owner: self.block, name: name.to_owned(), ..entry });
         self.build.blocks[self.block as usize].ports.push(index);
         index
     }
@@ -317,8 +344,24 @@ impl Registrar<'_> {
     }
 }
 
-fn port_type<T: 'static>() -> (TypeId, &'static str) {
-    (TypeId::of::<T>(), std::any::type_name::<T>())
+impl PortEntry {
+    /// An entry of `kind` carrying `T`, everything else empty; owner and
+    /// name are filled in by `Registrar::add`.
+    fn new<T: 'static>(kind: InterfaceKind) -> Self {
+        Self {
+            owner: u32::MAX,
+            name: String::new(),
+            kind,
+            type_id: TypeId::of::<T>(),
+            type_name: std::any::type_name::<T>(),
+            merge: MergeMode::Single,
+            clear: None,
+            merge_fn: None,
+            value: None,
+            mail: None,
+            delivery: Delivery::default(),
+        }
+    }
 }
 
 // ---- loading -----------------------------------------------------------------------
@@ -356,9 +399,18 @@ impl Linker<'_> {
         self.link(from.index, to.index)
     }
 
+    /// Link an outbox to an inbox (both exposed by children). Several
+    /// outboxes may feed one inbox, and one outbox may feed several inboxes.
+    pub fn connect_mail<M: 'static>(&mut self, from: Outbox<M>, to: Inbox<M>) -> Result<(), LinkError> {
+        if !from.is_registered() || !to.is_registered() {
+            return Err(LinkError::Unregistered);
+        }
+        self.link(from.index, to.index)
+    }
+
     /// Link by path, relative to this block (`"osc/out"`, `"filter/input"`),
-    /// for wiring that comes from data rather than code. Types are
-    /// checked when linking.
+    /// for wiring that comes from data rather than code: output → input, or
+    /// outbox → inbox. Types are checked when linking.
     pub fn connect_paths(&mut self, from: &str, to: &str) -> Result<(), LinkError> {
         let from = self.lookup(from)?;
         let to = self.lookup(to)?;
@@ -395,9 +447,11 @@ impl Linker<'_> {
     fn link(&mut self, from: u32, to: u32) -> Result<(), LinkError> {
         let b = &*self.build;
         let (f, t) = (&b.ports[from as usize], &b.ports[to as usize]);
-        if f.direction != Direction::Out || t.direction != Direction::In {
-            return Err(LinkError::WrongDirection(b.port_path(from), b.port_path(to)));
-        }
+        let mail = match (f.kind, t.kind) {
+            (InterfaceKind::Out, InterfaceKind::In) => false,
+            (InterfaceKind::Outbox, InterfaceKind::Inbox) => true,
+            _ => return Err(LinkError::WrongDirection(b.port_path(from), b.port_path(to))),
+        };
         for port in [from, to] {
             if !self.visible(port) {
                 return Err(LinkError::NotVisible(b.port_path(port)));
@@ -410,6 +464,14 @@ impl Linker<'_> {
                 to: b.port_path(to),
                 to_type: t.type_name,
             });
+        }
+        if mail {
+            // Mailboxes fan in and out freely; linking the same pair twice
+            // would only deliver every message twice.
+            if !b.mail_links.contains(&(from, to)) {
+                self.build.mail_links.push((from, to));
+            }
+            return Ok(());
         }
         if t.merge == MergeMode::Single && b.links.iter().any(|&(_, i)| i == to) {
             return Err(LinkError::AlreadyLinked(b.port_path(to)));

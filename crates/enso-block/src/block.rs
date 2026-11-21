@@ -161,12 +161,23 @@ handle!(
     Out
 );
 handle!(
+    /// Receives messages of type `T` from outboxes anywhere (this
+    /// workstream or others), read with [`Io::receive`]. The inbox owns its
+    /// mailbox and the messages it receives (decision 7).
+    Inbox
+);
+handle!(
+    /// Sends messages of type `T` with [`Io::send`]: never blocks.
+    Outbox
+);
+handle!(
     /// A child block of type `T`, as returned by [`Registrar::child`]. In
     /// `link`, `&l[child]` gives the child itself, to read its handles.
     Child
 );
 
-/// Either kind of port, for [`Registrar::private`] and [`Registrar::alias`].
+/// Any interface handle (port or mailbox), for [`Registrar::private`] and
+/// [`Registrar::alias`].
 pub trait PortHandle {
     #[doc(hidden)]
     fn port_index(&self) -> u32;
@@ -179,6 +190,18 @@ impl<T> PortHandle for In<T> {
 }
 
 impl<T> PortHandle for Out<T> {
+    fn port_index(&self) -> u32 {
+        self.index
+    }
+}
+
+impl<T> PortHandle for Inbox<T> {
+    fn port_index(&self) -> u32 {
+        self.index
+    }
+}
+
+impl<T> PortHandle for Outbox<T> {
     fn port_index(&self) -> u32 {
         self.index
     }

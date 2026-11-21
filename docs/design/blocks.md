@@ -58,6 +58,13 @@ composites. An execution engine runs the computation.
     step and resolved when staged changes are merged.
 22. **A `RealtimeMessage` marker trait** enforces decision 13 when mailboxes
     are connected.
+    *As implemented (agent, pending owner review):* the check uses
+    `!std::mem::needs_drop::<M>()`, the exact property decision 13 needs
+    (dropping the message runs no code). It's checked for **every** outbox
+    of a real-time workstream at build time, connected or not, because
+    sending to an unconnected outbox also drops the message on the sender's
+    thread. `RealtimeMessage` still exists, implemented for `Copy` messages,
+    for typed APIs.
 
 The audio engine (`enso-audio`) will be retrofitted first.
 
@@ -375,7 +382,7 @@ No blocking questions remain for a first implementation. Deferred:
    ✅ Plus `#[derive(Ports)]` (owner's request): ports and children
    declared as annotated fields; `Block::register` became optional and
    runs after the derived part.
-2. **Mailboxes and the engine:** `Inbox`/`Outbox`, Queue (drop-oldest) and
+2. ✅ **Mailboxes and the engine:** `Inbox`/`Outbox`, Queue (drop-oldest) and
    Latest policies, `RealtimeMessage`, `Engine` with several workstreams and
    path-based `connect_mail`.
 3. **Swap while running:** relink → compile → swap between steps, keeping

@@ -9,7 +9,7 @@ use syn::{
     Data, DeriveInput, Expr, Field, Fields, Ident, LitStr, Type, parse_macro_input, spanned::Spanned,
 };
 
-#[proc_macro_derive(Ports, attributes(input, output, child, private))]
+#[proc_macro_derive(Ports, attributes(input, output, inbox, outbox, child, private))]
 pub fn derive_ports(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand(&input) {
@@ -23,6 +23,8 @@ pub fn derive_ports(input: TokenStream) -> TokenStream {
 enum Kind {
     Input { default: Option<Expr>, merge: Option<Ident> },
     Output { initial: Option<Expr> },
+    Inbox { capacity: Option<Expr>, latest: bool },
+    Outbox,
     Child { init: Option<Expr> },
 }
 
@@ -80,6 +82,15 @@ fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
                 let initial = or_default(initial);
                 quote_spanned! {*span=> self.#ident = r.output(#name, #initial); }
             }
+            Kind::Inbox { capacity, latest } => {
+                let delivery = match (capacity, latest) {
+                    (_, true) => quote! { ::enso_block::Delivery::Latest },
+                    (Some(capacity), false) => quote! { ::enso_block::Delivery::Queue(#capacity) },
+                    (None, false) => quote! { ::core::default::Default::default() },
+                };
+                quote_spanned! {*span=> self.#ident = r.inbox(#name, #delivery); }
+            }
+            Kind::Outbox => quote_spanned! {*span=> self.#ident = r.outbox(#name); },
             Kind::Child { init } => {
                 let init = or_default(init);
                 quote_spanned! {*span=> self.#ident = r.child(#name, #init); }
@@ -118,32 +129,29 @@ fn parse_field(field: &Field) -> syn::Result<Option<PortField>> {
     let mut private = false;
 
     for attr in &field.attrs {
-        let which = if attr.path().is_ident("input") {
-            "input"
-        } else if attr.path().is_ident("output") {
-            "output"
-        } else if attr.path().is_ident("child") {
-            "child"
-        } else if attr.path().is_ident("private") {
+        if attr.path().is_ident("private") {
             private = true;
             continue;
-        } else {
+        }
+        let Some(which) = ["input", "output", "inbox", "outbox", "child"].into_iter().find(|w| attr.path().is_ident(w))
+        else {
             continue;
         };
         if kind.is_some() {
-            return Err(syn::Error::new(attr.span(), "a field can be only one of input, output or child"));
+            return Err(syn::Error::new(attr.span(), "a field can be only one of input, output, inbox, outbox or child"));
         }
 
-        let (mut value, mut merge) = (None, None);
+        let (mut value, mut merge, mut latest) = (None, None, false);
         // `#[input]` alone has no arguments; `#[input(..)]` has some.
         if matches!(attr.meta, syn::Meta::List(_)) {
             attr.parse_nested_meta(|meta| {
                 let key = meta.path.get_ident().map(Ident::to_string).unwrap_or_default();
                 match (which, key.as_str()) {
                     (_, "name") => name = meta.value()?.parse::<LitStr>()?.value(),
-                    ("input", "default") | ("output", "initial") | ("child", "init") => {
+                    ("input", "default") | ("output", "initial") | ("child", "init") | ("inbox", "capacity") => {
                         value = Some(meta.value()?.parse::<Expr>()?);
                     }
+                    ("inbox", "latest") => latest = true,
                     ("input", "merge") => {
                         let mode: Ident = meta.value()?.parse()?;
                         if !["Single", "Append", "Sum"].contains(&mode.to_string().as_str()) {
@@ -155,6 +163,8 @@ fn parse_field(field: &Field) -> syn::Result<Option<PortField>> {
                         let allowed = match which {
                             "input" => "name, default, merge",
                             "output" => "name, initial",
+                            "inbox" => "name, capacity, latest",
+                            "outbox" => "name",
                             _ => "name, init",
                         };
                         return Err(meta.error(format!("unknown argument for #[{which}]; expected {allowed}")));
@@ -169,22 +179,32 @@ fn parse_field(field: &Field) -> syn::Result<Option<PortField>> {
         let expected = match which {
             "input" => "In",
             "output" => "Out",
+            "inbox" => "Inbox",
+            "outbox" => "Outbox",
             _ => "Child",
         };
         if outer_type_name(&field.ty).as_deref() != Some(expected) {
             return Err(syn::Error::new(field.ty.span(), format!("#[{which}] fields must have type {expected}<..>")));
         }
+        if latest && value.is_some() {
+            return Err(syn::Error::new(attr.span(), "#[inbox] takes either `capacity` or `latest`, not both"));
+        }
 
         kind = Some(match which {
             "input" => Kind::Input { default: value, merge },
             "output" => Kind::Output { initial: value },
+            "inbox" => Kind::Inbox { capacity: value, latest },
+            "outbox" => Kind::Outbox,
             _ => Kind::Child { init: value },
         });
     }
 
     match kind {
+        Some(Kind::Child { .. }) if private => {
+            Err(syn::Error::new(field.span(), "#[private] goes with ports and mailboxes, not children"))
+        }
         Some(kind) => Ok(Some(PortField { ident, name, kind, private, span: field.span() })),
-        None if private => Err(syn::Error::new(field.span(), "#[private] goes with #[input] or #[output]")),
+        None if private => Err(syn::Error::new(field.span(), "#[private] goes with a port or mailbox attribute")),
         None => Ok(None),
     }
 }

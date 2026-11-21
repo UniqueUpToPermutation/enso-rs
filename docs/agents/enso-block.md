@@ -1,9 +1,9 @@
 # enso-block
 
-Implementation of [design/blocks.md](../design/blocks.md), build-order step 1:
-blocks, ports, interfaces, linking, and a single-threaded `Workstream`.
-**Not yet:** mailboxes, the engine (several workstreams), swapping while
-running, the ECS.
+Implementation of [design/blocks.md](../design/blocks.md), build-order
+steps 1–2: blocks, ports, interfaces, linking, a single-threaded
+`Workstream`, `#[derive(Ports)]`, mailboxes and the `Engine`.
+**Not yet:** swapping while running, delay blocks, the ECS.
 
 ## Files
 
@@ -85,6 +85,40 @@ even with no annotated fields, because `Ports` is a supertrait.
 - The macro checks the handle type of each field (`#[output]` on an `In`
   is an error) and reports **all** bad fields at once, with spans. It uses
   syn 2 (also in the tree: syn 3, pulled in by other crates).
+
+## Mailboxes and the engine (step 2)
+
+- `mail.rs`: `Mailbox<M>` wraps a `crossbeam_queue::ArrayQueue`. Senders
+  use `force_push`, which evicts the **oldest** message when full; the
+  evicted one is freed on the sender's thread and counted (`dropped`).
+  `Delivery::Latest` is the same queue with capacity 1 (replacing isn't
+  counted). `Delivery::Queue(n)` defaults to 64.
+- Interfaces now have an `InterfaceKind`: `In`, `Out`, `Inbox`, `Outbox`.
+  Mailbox ends are stored as "ports" internally (same handles, names,
+  visibility and `private`), with `MailFns` (type-specific function
+  pointers) instead of values.
+- Linking: `Linker::connect_mail(outbox, inbox)` or `connect_paths`
+  (which accepts either kind of pair). The visibility rules are the same as
+  for ports. Fan-in and fan-out are unlimited; a duplicate pair is ignored.
+  Mail links **don't affect execution order**.
+- Compile: each inbox gets an `Arc<Mailbox<M>>`; each outbox gets a
+  `Vec<Arc<Mailbox<M>>>` of targets (type-erased as `Box<dyn Any>`).
+- Step: first, each inbox's **budget** is set to the number of messages
+  waiting. `Io::receive` yields at most that many, so messages sent during
+  the step (even by blocks earlier in the same step) wait for the next one.
+  Unread messages stay queued. `Io::send` clones the message for all
+  targets but the last; with no targets, the message is simply dropped.
+- `Workstream::build_realtime`: **every** outbox's type must satisfy
+  `!needs_drop` (not just connected ones: sending to an unconnected outbox
+  also drops on the sending thread). The engine checks again when
+  connecting.
+- `Engine` (`engine.rs`): named workstreams; `connect_mail("ws:path",
+  "ws:path")`; `sender::<M>(inbox)` → `MailSender` (`Clone`, for e.g. MIDI
+  threads); `listen::<M>(outbox, delivery)` → `MailReceiver` (for the host
+  and tests); `take(name)` moves a workstream out to its thread (it's
+  `Send`); `step_all()` steps all of them in order on one thread.
+  Connections are made before the workstreams start; changing them while
+  running is step 3.
 
 ## API notes
 

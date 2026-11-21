@@ -51,14 +51,18 @@
 
 mod block;
 mod build;
+mod engine;
+mod mail;
 mod merge;
 mod workstream;
 
-pub use block::{Block, BlockError, Child, In, Out, PortHandle, Ports};
+pub use block::{Block, BlockError, Child, In, Inbox, Out, Outbox, PortHandle, Ports};
+pub use engine::{Engine, EngineError};
+pub use mail::{Delivery, MailReceiver, MailSender, Message, RealtimeMessage};
 /// `#[derive(Ports)]`; see the [`Ports`](trait@Ports) trait. A derive macro
 /// and a trait may share a name: they live in different namespaces (like
 /// serde's `Serialize`).
 pub use enso_block_derive::Ports;
-pub use build::{BuildError, Direction, Interface, LinkError, Linker, LoadContext, Registrar};
+pub use build::{BuildError, Interface, InterfaceKind, LinkError, Linker, LoadContext, Registrar};
 pub use merge::{Events, Merge, MergeMode, Stamped};
-pub use workstream::{AccessError, Io, Workstream};
+pub use workstream::{AccessError, Io, Receive, Workstream};

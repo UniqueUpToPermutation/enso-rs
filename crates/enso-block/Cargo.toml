@@ -6,6 +6,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+crossbeam-queue.workspace = true
 enso-block-derive.workspace = true
 enso-core.workspace = true
 thiserror.workspace = true
