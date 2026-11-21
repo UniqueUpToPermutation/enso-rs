@@ -7,7 +7,7 @@ use cpal::{
 };
 use enso_core::Clock;
 
-use crate::{AudioConfig, Processor};
+use crate::{AudioConfig, AudioDriver};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceError {
@@ -19,8 +19,8 @@ pub enum DeviceError {
     NoDefaultDevice,
     #[error("unsupported sample format {0}")]
     UnsupportedFormat(SampleFormat),
-    #[error("the processor runs at {processor} Hz but the device at {device} Hz")]
-    SampleRateMismatch { processor: u32, device: u32 },
+    #[error("the driver runs at {driver} Hz but the device at {device} Hz")]
+    SampleRateMismatch { driver: u32, device: u32 },
 }
 
 /// Names of the audio outputs on this system.
@@ -86,38 +86,38 @@ impl OutputDevice {
         self.config.channels
     }
 
-    /// The config to create the [`AudioEngine`](crate::AudioEngine) with.
+    /// The config to build the audio blocks and the [`AudioDriver`] with.
     pub fn audio_config(&self) -> AudioConfig {
         AudioConfig::new(self.config.sample_rate)
     }
 
-    /// Start playing: `processor` moves to the audio thread. Sound stops
+    /// Start playing: `driver` moves to the audio thread. Sound stops
     /// when the returned stream is dropped. `clock` must be the clock your
     /// MIDI events are stamped with.
-    pub fn start(self, processor: Processor, clock: Clock) -> Result<AudioStream, DeviceError> {
-        let rate = processor.config().sample_rate;
+    pub fn start(self, driver: AudioDriver, clock: Clock) -> Result<AudioStream, DeviceError> {
+        let rate = driver.config().sample_rate;
         if rate != self.config.sample_rate {
-            return Err(DeviceError::SampleRateMismatch { processor: rate, device: self.config.sample_rate });
+            return Err(DeviceError::SampleRateMismatch { driver: rate, device: self.config.sample_rate });
         }
         let stream = match self.format {
-            SampleFormat::F32 => self.build::<f32>(processor, clock),
-            SampleFormat::F64 => self.build::<f64>(processor, clock),
-            SampleFormat::I16 => self.build::<i16>(processor, clock),
-            SampleFormat::I32 => self.build::<i32>(processor, clock),
-            SampleFormat::I24 => self.build::<cpal::I24>(processor, clock),
-            SampleFormat::U16 => self.build::<u16>(processor, clock),
-            SampleFormat::I8 => self.build::<i8>(processor, clock),
-            SampleFormat::U8 => self.build::<u8>(processor, clock),
+            SampleFormat::F32 => self.build::<f32>(driver, clock),
+            SampleFormat::F64 => self.build::<f64>(driver, clock),
+            SampleFormat::I16 => self.build::<i16>(driver, clock),
+            SampleFormat::I32 => self.build::<i32>(driver, clock),
+            SampleFormat::I24 => self.build::<cpal::I24>(driver, clock),
+            SampleFormat::U16 => self.build::<u16>(driver, clock),
+            SampleFormat::I8 => self.build::<i8>(driver, clock),
+            SampleFormat::U8 => self.build::<u8>(driver, clock),
             other => return Err(DeviceError::UnsupportedFormat(other)),
         }?;
         stream.play()?;
         Ok(AudioStream { stream, name: self.name, config: self.config })
     }
 
-    /// Build a stream for sample type `T`. The processor always renders
+    /// Build a stream for sample type `T`. The driver always renders
     /// f32 into a scratch buffer (allocated here, up front), converted to
     /// `T` as it's copied out. For f32 devices the conversion is a copy.
-    fn build<T>(&self, mut processor: Processor, clock: Clock) -> Result<cpal::Stream, DeviceError>
+    fn build<T>(&self, mut driver: AudioDriver, clock: Clock) -> Result<cpal::Stream, DeviceError>
     where
         T: SizedSample + FromSample<f32>,
     {
@@ -138,7 +138,7 @@ impl OutputDevice {
                     let after = (total - done - frames) as f64 / rate;
                     let piece_now = now - std::time::Duration::from_secs_f64(after);
                     let scratch = &mut scratch[..piece.len()];
-                    processor.process(scratch, channels, piece_now);
+                    driver.render(scratch, channels, piece_now);
                     for (out, &sample) in piece.iter_mut().zip(scratch.iter()) {
                         *out = T::from_sample(sample);
                     }
@@ -153,7 +153,7 @@ impl OutputDevice {
     }
 }
 
-/// A playing output. Dropping it stops the sound (and frees the processor).
+/// A playing output. Dropping it stops the sound (and frees the driver).
 pub struct AudioStream {
     stream: cpal::Stream,
     name: String,

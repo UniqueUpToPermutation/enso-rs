@@ -1218,12 +1218,11 @@ version = "0.1.0"
 dependencies = [
  "assert_no_alloc",
  "cpal",
- "crossbeam-queue",
+ "enso-block",
  "enso-core",
  "enso-io",
  "env_logger",
  "log",
- "rtrb",
  "thiserror 2.0.21",
 ]
 
@@ -1273,6 +1272,7 @@ dependencies = [
  "egui",
  "egui-snarl",
  "enso-audio",
+ "enso-block",
  "enso-core",
  "log",
 ]

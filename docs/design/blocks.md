@@ -426,8 +426,8 @@ No blocking questions remain for a first implementation. Deferred:
 3. ✅ **Swap while running:** relink → compile → swap between steps, keeping
    block state. That's the existing `enso-audio` command/garbage mechanism,
    generalised (decision 26).
-4. **Retrofit `enso-audio`** onto it (§10). The offline-rendering and
+4. ✅ **Retrofit `enso-audio`** onto it (§10). The offline-rendering and
    no-alloc tests must pass at every step.
 5. **The ECS and the sim workstream** (§8), feeding `RenderWorld` to the
    renderer through a `Latest` mailbox.
-6. The patch editor becomes a block-tree editor.
+6. ✅ The patch editor becomes a block-tree editor (a data-defined `PatchRoot`; done with step 4).

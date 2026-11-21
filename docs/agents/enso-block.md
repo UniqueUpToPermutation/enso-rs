@@ -196,6 +196,17 @@ even with no annotated fields, because `Ports` is a supertrait.
   of the tree (e.g. a grandchild through a child's `Child` field).
 - `Linker::connect` / `connect_mail` are typed (checked by the compiler);
   `connect_ids` checks kind and `TypeId` at link time.
+- **Step context:** `Workstream::step_with(&ctx)` hands every block a
+  `&dyn Any`, read with `io.context::<C>()` (`None` from plain `step()`).
+  That's how audio blocks get `AudioContext` without the platform knowing
+  about audio.
+- `Workstream::peek(port)` → `Option<Ref<T>>`: like `read` but never
+  allocates, even on failure (for reading results on real-time threads).
+- `Engine::set_id(InterfaceId, value)`: knobs by ID (the patch editor).
+- `Events::push` never allocates: it returns `false` and drops the event
+  at capacity.
+- `#[derive(Ports)]` emits `::enso_block::...` paths, so a crate using it
+  needs `enso-block` as a **direct** dependency.
   `Linker::available()` lists what can be linked.
 
 Tests: `tests/blocks.rs` (one per design rule, small arithmetic blocks)

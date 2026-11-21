@@ -121,6 +121,18 @@ impl Engine {
         Ok(())
     }
 
+    /// Like [`set`](Self::set), by ID: for tools working from data (the
+    /// patch editor).
+    pub fn set_id<T: Send + 'static>(&mut self, input: InterfaceId, value: T) -> Result<(), EngineError> {
+        self.collect_garbage();
+        let (index, port) = self.find_id(input)?;
+        let control = &mut self.entries[index].control;
+        control.layout.check_type::<T>(port)?;
+        let slot = control.layout.knob_slot(port)?;
+        control.set(slot, Box::new(value))?;
+        Ok(())
+    }
+
     /// Link an outbox to an inbox, in the same workstream or different
     /// ones. Both must be exposed by their roots.
     pub fn connect_mail<M: Message>(&mut self, from: Outbox<M>, to: Inbox<M>) -> Result<(), EngineError> {

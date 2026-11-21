@@ -33,9 +33,11 @@ No dependencies, by design: everything depends on it, so it must stay tiny.
   with hot-plug support. Call `refresh()` about once a second: it opens new
   devices, drops vanished ones, and keeps each device name's `PortId`
   stable across replugging. Failures are logged once, then retried quietly.
-  `rtrb::Producer` isn't `Clone` (single producer), so the audio engine
-  takes MIDI through `enso_audio::MidiQueue` (`Arc<ArrayQueue<MidiEvent>>`,
-  lock-free multi-producer) instead, which also implements `MidiSink`.
+  `rtrb::Producer` isn't `Clone` (single producer). The audio engine takes
+  MIDI through an `enso_block::MailSender<MidiEvent>` into the patch's
+  `MidiSource` inbox; the app wraps it in a small `Clone` sink (see
+  `crates/enso/src/main.rs`) or an `FnSink` closure. (A plain
+  `Arc<ArrayQueue<MidiEvent>>` also implements `MidiSink`.)
 - `MidiOut::open(pattern)` / `send(MidiMessage)`: hardware synths, or a
   virtual port (loopMIDI) into a DAW.
 - `input_names()` / `output_names()`.

@@ -80,7 +80,7 @@ impl MidiSink for rtrb::Producer<MidiEvent> {
     }
 }
 
-/// The audio engine's MIDI queue (`enso_audio::MidiQueue`): lock-free, and
+/// A lock-free multi-producer queue of MIDI events (`Arc<ArrayQueue<MidiEvent>>`):
 /// `Clone`, so every input can feed it directly. Drops events when full.
 impl MidiSink for Arc<ArrayQueue<MidiEvent>> {
     fn send(&mut self, event: MidiEvent) {

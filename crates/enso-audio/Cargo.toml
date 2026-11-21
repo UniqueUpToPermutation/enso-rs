@@ -7,10 +7,9 @@ license.workspace = true
 
 [dependencies]
 cpal.workspace = true
-crossbeam-queue.workspace = true
+enso-block.workspace = true
 enso-core.workspace = true
 log.workspace = true
-rtrb.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

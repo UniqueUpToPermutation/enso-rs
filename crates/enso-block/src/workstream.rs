@@ -96,6 +96,14 @@ impl Workstream {
     /// the next step. A block that panics is switched off (see
     /// [`disabled`](Self::disabled)); the rest carry on.
     pub fn step(&mut self) {
+        self.step_with(&());
+    }
+
+    /// Like [`step`](Self::step), handing every block `context`: whatever
+    /// the host knows about this step (for audio: sample rate, frame count,
+    /// the step's time window). Blocks read it with [`Io::context`]. Keeps
+    /// the platform domain-agnostic: the workstream never looks inside.
+    pub fn step_with(&mut self, context: &dyn Any) {
         self.apply_commands();
 
         let graph = &*self.graph;
@@ -126,6 +134,7 @@ impl Workstream {
                 targets: &self.targets.0,
                 budget: &graph.budget,
                 step: self.steps,
+                context,
             };
             if catch_unwind(AssertUnwindSafe(|| routine.process(&io))).is_err() {
                 graph.blocks[block] = None;
@@ -236,6 +245,18 @@ impl Workstream {
         Ok(self.value(port))
     }
 
+    /// Like [`read`](Self::read), but never allocates, even when it fails
+    /// (`None`: foreign, removed, unexposed, or of another type). For hosts
+    /// reading results on a real-time thread, e.g. the audio output.
+    pub fn peek<T: 'static>(&self, port: impl ValuePort<T>) -> Option<Ref<'_, T>> {
+        let layout = &self.graph.layout;
+        let index = port.port_index() as usize;
+        let info = layout.ports.get(index)?.as_ref()?;
+        let ok = port.port_tree() == layout.tree && layout.exposed[index] && info.type_id == std::any::TypeId::of::<T>();
+        let slot = self.graph.slots.get(*self.graph.port_slot.get(index)? as usize).filter(|_| ok)?;
+        Some(Ref::map(slot.borrow(), |v| (**v).downcast_ref::<T>().expect("type checked")))
+    }
+
     /// Like [`read`](Self::read), by ID (for tools working from data).
     pub fn read_id<T: 'static>(&self, id: InterfaceId) -> Result<Ref<'_, T>, AccessError> {
         let layout = &self.graph.layout;
@@ -338,6 +359,7 @@ pub struct Io<'a> {
     targets: &'a [Option<Box<dyn Any + Send + Sync>>],
     budget: &'a [Cell<usize>],
     step: u64,
+    context: &'a dyn Any,
 }
 
 impl Io<'_> {
@@ -384,6 +406,12 @@ impl Io<'_> {
     /// Which step this is (0, 1, 2, ...).
     pub fn step(&self) -> u64 {
         self.step
+    }
+
+    /// What the host handed to [`Workstream::step_with`] for this step, if
+    /// it's a `C`. Audio blocks read an `AudioContext` here.
+    pub fn context<C: 'static>(&self) -> Option<&C> {
+        self.context.downcast_ref::<C>()
     }
 
     /// Panics (and so switches the block off) on another block's

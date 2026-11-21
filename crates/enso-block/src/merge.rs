@@ -112,10 +112,16 @@ impl<T> Events<T> {
 }
 
 impl<T: Stamped> Events<T> {
-    /// Insert in time order (after events with the same timestamp).
-    pub fn push(&mut self, event: T) {
+    /// Insert in time order (after events with the same timestamp). Never
+    /// allocates: when the list is at capacity, the event is dropped and
+    /// `false` returned (so it's safe on a real-time thread).
+    pub fn push(&mut self, event: T) -> bool {
+        if self.items.len() == self.items.capacity() {
+            return false;
+        }
         let at = self.items.partition_point(|e| e.timestamp() <= event.timestamp());
         self.items.insert(at, event);
+        true
     }
 }
 
@@ -128,7 +134,7 @@ impl<T: Stamped + Clone + Send + 'static> Merge for Events<T> {
     }
     fn merge(&mut self, other: &Self, _mode: MergeMode) {
         for event in &other.items {
-            self.push(event.clone());
+            let _ = self.push(event.clone());
         }
     }
 }

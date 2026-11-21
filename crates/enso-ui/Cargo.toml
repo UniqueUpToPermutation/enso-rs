@@ -9,5 +9,6 @@ license.workspace = true
 egui.workspace = true
 egui-snarl.workspace = true
 enso-audio.workspace = true
+enso-block.workspace = true
 enso-core.workspace = true
 log.workspace = true

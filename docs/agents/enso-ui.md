@@ -1,52 +1,62 @@
 # enso-ui and the enso app
 
-## enso-ui: `PatchEditor`
+## enso-ui
 
 A node-graph editor (egui-snarl, vendored; see `third_party/README.md`)
-for the audio engine's patch.
+for the audio patch, applied to a running block workstream.
 
-- `Snarl<PatchNode>` holds the layout and wiring. A `PatchNode` has a
-  `NodeKind`, its knobs (each a `Knob` bound to an `enso_audio::SharedParam`),
-  and `engine: Option<NodeId>`.
-- `show(ui, ports)` draws the graph through a `Viewer` that implements
-  `SnarlViewer`:
-  - Pins are typed (`Signal::Midi` squares, `Signal::Audio` circles), and
-    `connect` refuses mismatched ones.
-  - Right-click the background for the add-node menu (`NodeKind::MENU`),
-    and a node for "Remove".
-  - Bodies hold the knob sliders and, for MIDI in nodes, the
-    device/channel pickers.
-- `sync(engine)` runs after `show`, every frame:
-  1. It creates engine nodes for graph nodes that don't have one yet.
-  2. It removes engine nodes whose graph node is gone (`known` vs. alive),
-     so removal works however the graph node was deleted.
-  3. It builds a `Patch` from the wires and sends it **only if it
-     differs** from `engine.patch()`. *MIDI in* becomes
-     `MidiFrom::Input(filter)`, and *Output* becomes `patch.output(..)`;
-     neither has an engine node. Errors such as cycles go to `error()`,
-     and the old patch keeps playing.
-- Knob values reach the audio thread directly through `SharedParam`
-  atomics (lock-free, latest value wins). Nodes smooth them (`Smoothed`).
+- `patch.rs` (no GUI): `NodeKind` (the menu), each kind's pins
+  (`Signal` + the block interface's `Key`, i.e. `Key::named(field name)`)
+  and knobs (`KnobSpec` with the block's `DEFAULT_*`); `PatchSpec` (nodes as
+  `(BlockId, NodeKind)`, wires as `(Endpoint, Endpoint)`); `PatchRoot`, the
+  **data-defined composite**:
+  - Fixed children: `MidiSource` (key "source") and `AudioOut` (key
+    "output").
+  - One child per node via `child_with_id(node UUID, ..)`. "MIDI in" nodes
+    are `MidiFilter`s fed from the source; "Output" nodes have no block
+    (`Endpoint::Output` resolves to the `AudioOut` input).
+  - Wires are linked with `connect_ids`.
+- `patch_editor.rs`: `PatchNode { kind, id: BlockId (random UUID, stable for
+  the node's life), knobs }`.
+  - `show(ui, ports)` draws the graph through a `Viewer` (typed pins; only
+    same-signal wires connect; add/remove menus; knob sliders and MIDI
+    pickers). Slider changes are queued as `(InterfaceId, f32)`.
+  - `sync(engine, audio)`: builds the `PatchSpec`; if it differs from the
+    last **attempted** one, `engine.rebuild(audio, PatchRoot)`. A failure
+    (e.g. a cycle) is shown via `error()`, the old patch keeps playing, and
+    the same failing spec isn't retried every frame. It then sends queued
+    knob changes with `engine.set_id`.
+  - `root()` gives the initial `PatchRoot` (build the workstream from it).
+- Because blocks keep `#[state]` across rebuilds, rewiring doesn't cut
+  sounding notes or delay tails. Tests (`patch_editor::tests`) render
+  offline through an `AudioDriver` and check exactly that, plus cycles and
+  knobs.
 
 ### Adding a node kind
 
-1. Add the node in `enso-audio/src/nodes/`, with its knobs as `SharedParam`s.
-2. Add it to `enso-audio/tests/no_alloc.rs`.
-3. In `patch_editor.rs`: add a `NodeKind` variant, then fill in `MENU`,
-   `title`, `inputs`, `outputs`, the knobs in `PatchNode::new`, and
-   `instantiate`.
-
-Tests (`patch_editor::tests`) build graphs in code, sync them into an
-offline engine, and render to check sound, deletion and cycles.
+1. Add the block in `enso-audio/src/blocks/` (knobs as `In<f32>` with
+   `DEFAULT_*` consts, state as `#[state]`) and to
+   `enso-audio/tests/no_alloc.rs`.
+2. In `patch.rs`: a `NodeKind` variant, then `MENU`, `title`, `inputs`,
+   `outputs` (keys = the block's field names), `knobs`, and a
+   `PatchRoot::register` arm.
 
 ## crates/enso: the app
 
 `cargo run -p enso [-- <output name>]`. eframe 0.37 (wgpu backend, the
-same wgpu 30 as the renderer). It opens the audio output, connects every
-MIDI input to the engine's queue, and shows the editor with a starter patch
-(MIDI in → test synth → low-pass → delay → gain → output). A status bar
-shows the device, buffer size, load, MIDI inputs and errors. If there's no
-audio device, the editor still runs with a detached engine.
+same wgpu 30 as the renderer). At startup:
 
-Not yet: saving/loading patches (snarl has a `serde` feature), the visual
-renderer in the window, MIDI learn.
+1. Open the audio device; build a real-time workstream from
+   `editor.root()`; add it to an `Engine`.
+2. Get the `MidiSource` inbox and `AudioOut` input handles; take the runner
+   into an `AudioDriver` and start the device.
+3. Connect every MIDI input to the inbox through a cloneable
+   `MailSender` wrapper.
+
+Each frame: `editor.show`, `editor.sync`, `engine.collect_garbage`. With no
+audio device, the workstream stays in the engine and `engine.step_all()`
+applies changes silently. The status bar shows the device, buffer, load
+(`StatsHandle`), MIDI inputs, crashed blocks, and editor errors.
+
+Not yet: saving/loading patches (a `PatchSpec` is already plain data with
+UUIDs), the visual renderer in the window, MIDI learn.

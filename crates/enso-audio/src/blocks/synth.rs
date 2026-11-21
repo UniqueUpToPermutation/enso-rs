@@ -3,26 +3,38 @@
 
 use std::f32::consts::TAU;
 
+use enso_block::{Block, In, Io, Out, Ports};
 use enso_core::{Channel, MidiMessage, midi::key_frequency};
 
-use crate::{AudioConfig, BlockEvent, Node, Process};
+use crate::{AudioBuf, AudioConfig, AudioContext, BlockEvent, MidiEvents, midi_events};
 
 const VOICES: usize = 16;
 /// Per-voice level at full velocity; leaves headroom for chords.
 const VOICE_GAIN: f32 = 0.15;
 /// Pitch bend range, in semitones.
 const BEND_RANGE: f32 = 2.0;
+const SUSTAIN: f32 = 0.55;
 
 /// A soft organ-ish tone (a sine plus two quiet harmonics) with an
 /// attack/decay/sustain/release envelope. Responds to note on/off, velocity,
 /// the sustain pedal (CC 64) and pitch bend. 16 voices; when all are busy,
-/// the oldest is stolen.
+/// the oldest is stolen. Sounding voices survive rebuilds (`#[state]`).
+#[derive(Ports)]
 pub struct TestSynth {
+    config: AudioConfig,
+    #[input(name = "midi", default = midi_events(), merge = Append)]
+    pub midi: In<MidiEvents>,
+    #[output(initial = AudioBuf::new(self.config))]
+    pub out: Out<AudioBuf>,
+
+    #[state]
     voices: [Voice; VOICES],
-    sample_rate: f32,
     /// Counts note-ons, to find the oldest voice.
+    #[state]
     clock: u64,
+    #[state]
     sustain: [bool; 16],
+    #[state]
     bend: [f32; 16],
     env: Envelope,
 }
@@ -58,8 +70,6 @@ struct Envelope {
     release_coef: f32,
 }
 
-const SUSTAIN: f32 = 0.55;
-
 impl Envelope {
     fn new(sample_rate: f32) -> Self {
         // One-pole smoothing: covers ~63% of the remaining distance per time constant.
@@ -70,14 +80,15 @@ impl Envelope {
 
 impl TestSynth {
     pub fn new(config: AudioConfig) -> Self {
-        let sample_rate = config.sample_rate as f32;
         Self {
+            config,
+            midi: In::default(),
+            out: Out::default(),
             voices: [Voice::default(); VOICES],
-            sample_rate,
             clock: 0,
             sustain: [false; 16],
             bend: [1.0; 16],
-            env: Envelope::new(sample_rate),
+            env: Envelope::new(config.sample_rate as f32),
         }
     }
 
@@ -119,9 +130,7 @@ impl TestSynth {
             .iter()
             .position(|v| v.stage != Stage::Off && v.channel == channel && v.key == key)
             .or_else(|| self.voices.iter().position(|v| v.stage == Stage::Off))
-            .unwrap_or_else(|| {
-                (0..VOICES).min_by_key(|&i| self.voices[i].started).expect("VOICES > 0")
-            });
+            .unwrap_or_else(|| (0..VOICES).min_by_key(|&i| self.voices[i].started).expect("VOICES > 0"));
         self.clock += 1;
         let voice = &mut self.voices[index];
         let restrike = voice.stage != Stage::Off && voice.key == key;
@@ -145,11 +154,15 @@ impl Voice {
     }
 }
 
-impl Node for TestSynth {
-    fn process(&mut self, p: Process<'_>) {
-        let [left, right] = p.output;
-        let mut events = p.events.iter().peekable();
-        for frame in 0..p.frames {
+impl Block for TestSynth {
+    fn process(&mut self, io: &Io) {
+        let Some(ctx) = io.context::<AudioContext>() else { return };
+        let sample_rate = ctx.sample_rate;
+        let events = io.read(self.midi);
+        let mut out = io.write(self.out);
+        let [left, right] = out.write(ctx.frames);
+        let mut events = events.as_slice().iter().peekable();
+        for frame in 0..left.len() {
             // Sample-accurate: apply each event at its own frame.
             while let Some(event) = events.next_if(|e| e.offset as usize <= frame) {
                 self.handle(event);
@@ -177,7 +190,7 @@ impl Node for TestSynth {
                 }
 
                 let frequency = key_frequency(voice.key) * self.bend[usize::from(voice.channel.index())];
-                voice.phase = (voice.phase + frequency / self.sample_rate).fract();
+                voice.phase = (voice.phase + frequency / sample_rate).fract();
                 let x = voice.phase * TAU;
                 let tone = x.sin() + 0.3 * (2.0 * x).sin() + 0.12 * (3.0 * x).sin();
                 sample += tone * voice.level * voice.velocity * VOICE_GAIN;
