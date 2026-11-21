@@ -1,0 +1,10 @@
+[package]
+name = "enso-block"
+description = "The block compute platform: blocks, ports, linking, and workstreams that run them."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+enso-core.workspace = true
+thiserror.workspace = true

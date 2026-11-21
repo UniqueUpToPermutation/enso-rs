@@ -1228,6 +1228,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "enso-block"
+version = "0.1.0"
+dependencies = [
+ "enso-core",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "enso-core"
 version = "0.1.0"
 

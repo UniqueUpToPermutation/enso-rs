@@ -16,6 +16,7 @@ behind Rust/Cargo choices briefly when you make them.
 | `crates/enso-core` | Working: `Clock`/`Timestamp`, MIDI message types (parse/encode) |
 | `crates/enso-io` | Working: hot-pluggable timestamped MIDI inputs, MIDI output. Asset loading planned |
 | `crates/enso-audio` | Working: rewireable node graph on the real-time thread, sample-accurate MIDI, cpal output, test synth, offline rendering, no-alloc test |
+| `crates/enso-block` | Step 1 of the block platform: blocks, ports, interfaces, linking, single-threaded `Workstream`. Mailboxes/engine next |
 | `crates/enso-ui` | Working: `PatchEditor` (egui-snarl node graph, applied to the audio engine live) |
 | `crates/enso` (bin) | Working: eframe app with the patch editor, audio output and MIDI |
 | `enso-engine` (ECS), `enso-plugin` (VST3) | Planned, not created yet. See [architecture](docs/agents/architecture.md) |
@@ -77,6 +78,7 @@ cargo doc -p enso-visual --no-deps --open           # browse the public API
 - [enso-visual.md](docs/agents/enso-visual.md): renderer internals, frame flow, adding a subrenderer
 - [enso-io.md](docs/agents/enso-io.md): enso-core types (clock, MIDI), MIDI devices, event-to-sim time
 - [enso-audio.md](docs/agents/enso-audio.md): engine/processor split, patches, real-time rules, timing
+- [enso-block.md](docs/agents/enso-block.md): how the block platform's build/compile/step is implemented
 - [enso-ui.md](docs/agents/enso-ui.md): patch editor (graph → engine sync), the enso app, adding node kinds
 - [dependency-notes.md](docs/agents/dependency-notes.md): API gotchas in wgpu 30 / glam 0.34 / winit 0.30
 - [workflow.md](docs/agents/workflow.md): verifying changes, Windows shell quirks, git conventions

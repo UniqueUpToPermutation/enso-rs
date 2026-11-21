@@ -17,6 +17,7 @@ license = "MIT OR Apache-2.0"
 enso-core = { path = "crates/enso-core" }
 enso-io = { path = "crates/enso-io" }
 enso-audio = { path = "crates/enso-audio" }
+enso-block = { path = "crates/enso-block" }
 enso-visual = { path = "crates/enso-visual" }
 enso-ui = { path = "crates/enso-ui" }
 # Vendored and ported to egui 0.37 (see third_party/README.md).

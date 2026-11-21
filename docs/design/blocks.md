@@ -1,6 +1,7 @@
 # Design: blocks
 
-**Status:** draft, under discussion. Nothing here is built yet.
+**Status:** agreed. Build-order step 1 (§12) is implemented in
+`crates/enso-block` (see [enso-block.md](../agents/enso-block.md)).
 
 **Owner's brief (2026-11-21):** The user defines *blocks*. Blocks have
 inputs (`In<T>`) and outputs (`Out<T>`). Attaching inputs to outputs builds
@@ -366,7 +367,7 @@ No blocking questions remain for a first implementation. Deferred:
 
 ## 12. Suggested build order
 
-1. **`enso-block` core:** `Block` trait, `Registrar`, `Linker`,
+1. ✅ **`enso-block` core:** `Block` trait, `Registrar`, `Linker`,
    `In`/`Out` handles, the interface dictionary with floating up and
    `private`, aliases, merge modes. Compile a tree into a flat ordered
    graph. Single-threaded `Workstream::step`. Tests with small
