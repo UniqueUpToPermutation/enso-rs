@@ -1,27 +1,29 @@
-//! [`Workstream`]: runs one block tree, step after step.
+//! [`Workstream`]: runs one block tree, step after step, and swaps in
+//! rebuilt graphs between steps.
 
 use std::{
-    any::{Any, TypeId},
+    any::Any,
     cell::{Cell, Ref, RefCell, RefMut},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::Arc,
 };
 
 use crate::{
-    Block, BlockId, BuildError, Child, In, Inbox, Interface, InterfaceId, InterfaceKind, MergeMode, Message, Out,
-    Outbox, PortHandle,
-    build::Build,
-    mail::{AnyMailbox, MailFns, Mailbox},
-    merge::{ClearFn, MergeFn},
+    Block, BlockId, BuildError, Child, In, Inbox, Interface, InterfaceId, Message, Out, Outbox, PortHandle,
+    control::{Command, Control, Garbage, RunnerQueues},
+    graph::{Graph, TargetTable},
+    mail::{AnyMailbox, Mailbox},
 };
 
-/// One input's fan-in, done before its block runs.
-struct MergeStep {
-    into: usize,
-    sources: Vec<usize>,
-    mode: MergeMode,
-    clear: ClearFn,
-    merge: MergeFn,
+/// How to build a [`Workstream`]; see [`Workstream::build_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuildOptions {
+    /// The root block's ID. Every other block's ID derives from it, so give
+    /// the same ID on every run to keep saved references valid. Default:
+    /// random.
+    pub id: Option<BlockId>,
+    /// Stepped on a real-time thread (see [`Workstream::build_realtime`]).
+    pub realtime: bool,
 }
 
 /// Runs one block tree. Single-threaded: [`step`](Self::step) runs every
@@ -33,56 +35,23 @@ struct MergeStep {
 /// once. `RefCell` checks borrows with a plain counter: no locks, no
 /// allocation, fine on the audio thread.
 ///
+/// **Changing it while it runs** (step 3): [`rebuild`](Self::rebuild) (or
+/// `Engine::rebuild` once an engine controls it) builds the new tree
+/// elsewhere and hands it over; the next `step` swaps it in by moving
+/// pointers. Blocks that still exist with the same type and interfaces keep
+/// running, with their state; knob values, output values and inbox
+/// mailboxes carry over; handles stay valid.
+///
 /// A workstream is `Send`: build it anywhere, then move it to the thread
 /// that steps it.
 pub struct Workstream {
-    blocks: Vec<Option<Box<dyn Block>>>,
-    paths: Vec<String>,
-    /// Block indices in execution order.
-    order: Vec<u32>,
-    /// Per block: merges to run before it.
-    merges: Vec<Vec<MergeStep>>,
-    slots: Vec<RefCell<Box<dyn Any + Send>>>,
-
-    // Per interface ("port" index):
-    port_slot: Vec<u32>,
-    port_owner: Vec<u32>,
-    port_kind: Vec<InterfaceKind>,
-    port_type: Vec<(TypeId, &'static str)>,
-    /// True for an input holding its own value with nothing linked: a knob
-    /// that [`set`](Self::set) may change.
-    knob: Vec<bool>,
-    mail_fns: Vec<Option<MailFns>>,
-    /// Inboxes: their mailbox.
-    mailbox: Vec<Option<AnyMailbox>>,
-    /// Outboxes: their targets (`Vec<Arc<Mailbox<M>>>`, type-erased).
-    targets: Vec<Option<Box<dyn Any + Send + Sync>>>,
-    /// Inboxes: messages this step may still take (those that had arrived
-    /// when the step began).
-    budget: Vec<Cell<usize>>,
-    inboxes: Vec<u32>,
-
-    /// For display: each port's labels from the root.
-    port_path: Vec<String>,
-    /// Which ports the root exposes (others can't be reached from outside).
-    exposed: Vec<bool>,
-    interfaces: Vec<Interface>,
-    tree: u32,
-    id: BlockId,
-    realtime: bool,
+    graph: Box<Graph>,
+    targets: Box<TargetTable>,
+    queues: RunnerQueues,
+    /// The control side, until an [`Engine`](crate::Engine) takes it over.
+    control: Option<Control>,
     steps: u64,
     disabled: Vec<u32>,
-}
-
-/// How to build a [`Workstream`]; see [`Workstream::build_with`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct BuildOptions {
-    /// The root block's ID. Every other block's ID derives from it, so give
-    /// the same ID on every run to keep saved references valid. Default:
-    /// random.
-    pub id: Option<BlockId>,
-    /// Stepped on a real-time thread (see [`Workstream::build_realtime`]).
-    pub realtime: bool,
 }
 
 impl Workstream {
@@ -96,163 +65,132 @@ impl Workstream {
     /// thread (audio). Its outboxes may only carry messages that own no
     /// memory (decision 13), so sending, or evicting from a full queue,
     /// never frees memory on that thread. Checked here and whenever the
-    /// engine connects one of its outboxes.
+    /// engine connects one of its outboxes. Rebuild it through an
+    /// [`Engine`](crate::Engine), so old graphs are freed on the control
+    /// thread.
     pub fn build_realtime(root: impl Block) -> Result<Self, BuildError> {
         Self::build_with(root, BuildOptions { realtime: true, ..Default::default() })
     }
 
     pub fn build_with(root: impl Block, options: BuildOptions) -> Result<Self, BuildError> {
         let id = options.id.unwrap_or_else(BlockId::random);
-        Self::compile(Build::new(Box::new(root), id)?, options.realtime)
+        let (control, graph, targets, queues) = Control::new(Box::new(root), id, options.realtime)?;
+        Ok(Self { graph, targets, queues, control: Some(control), steps: 0, disabled: Vec::new() })
     }
 
-    fn compile(mut build: Build, realtime: bool) -> Result<Self, BuildError> {
-        let port_count = build.ports.len();
-        let mut slots = Vec::new();
-        let mut port_slot = vec![u32::MAX; port_count];
-        let mut knob = vec![false; port_count];
-        let mut new_slot = |value: Box<dyn Any + Send>| {
-            slots.push(RefCell::new(value));
-            (slots.len() - 1) as u32
-        };
-
-        // Outputs first: every output owns a slot.
-        for (i, port) in build.ports.iter_mut().enumerate() {
-            if port.kind == InterfaceKind::Out {
-                port_slot[i] = new_slot(port.value.take().expect("value"));
-            }
-        }
-        // Inputs: a single link reads the source's slot directly (no copy);
-        // otherwise the input keeps its own value.
-        let mut merges: Vec<Vec<MergeStep>> = (0..build.blocks.len()).map(|_| Vec::new()).collect();
-        for (i, port) in build.ports.iter_mut().enumerate() {
-            if port.kind != InterfaceKind::In {
-                continue;
-            }
-            let sources: Vec<usize> = build
-                .links
-                .iter()
-                .filter(|&&(_, to)| to as usize == i)
-                .map(|&(from, _)| port_slot[from as usize] as usize)
-                .collect();
-            match (port.merge, sources.as_slice()) {
-                (MergeMode::Single, [source]) => port_slot[i] = *source as u32,
-                (_, []) => {
-                    port_slot[i] = new_slot(port.value.take().expect("value"));
-                    knob[i] = true;
-                }
-                (mode, _) => {
-                    let into = new_slot(port.value.take().expect("value"));
-                    port_slot[i] = into;
-                    merges[port.owner as usize].push(MergeStep {
-                        into: into as usize,
-                        sources,
-                        mode,
-                        clear: port.clear.expect("merging inputs have merge functions"),
-                        merge: port.merge_fn.expect("merging inputs have merge functions"),
-                    });
-                }
-            }
-        }
-
-        // Mailboxes: one per inbox; outboxes get the inboxes linked to them.
-        let mut mailbox: Vec<Option<AnyMailbox>> = vec![None; port_count];
-        let mut targets: Vec<Option<Box<dyn Any + Send + Sync>>> = (0..port_count).map(|_| None).collect();
-        let mut inboxes = Vec::new();
-        for (i, port) in build.ports.iter().enumerate() {
-            let Some(fns) = port.mail else { continue };
-            match port.kind {
-                InterfaceKind::Inbox => {
-                    mailbox[i] = Some((fns.make_mailbox)(port.delivery));
-                    inboxes.push(i as u32);
-                }
-                InterfaceKind::Outbox => {
-                    if realtime && fns.drops {
-                        return Err(BuildError::NotRealtimeSafe { path: build.port_path(i as u32), type_name: port.type_name });
-                    }
-                    targets[i] = Some((fns.make_targets)());
-                }
-                _ => {}
-            }
-        }
-        for &(from, to) in &build.mail_links {
-            let fns = build.ports[from as usize].mail.expect("outbox");
-            let target = mailbox[to as usize].clone().expect("inbox");
-            let list = targets[from as usize].as_deref_mut().expect("outbox");
-            (fns.add_target)(list, target);
-        }
-
-        let order = execution_order(&build)?;
-        let interfaces = std::mem::take(&mut build.blocks[0].dictionary);
-        let mut exposed = vec![false; port_count];
-        for interface in &interfaces {
-            exposed[interface.port as usize] = true;
-        }
-        Ok(Self {
-            port_path: (0..port_count as u32).map(|p| build.port_path(p)).collect(),
-            exposed,
-            tree: build.tree,
-            id: build.blocks[0].id,
-            paths: build.blocks.iter().map(|b| b.path.clone()).collect(),
-            blocks: build.blocks.into_iter().map(|b| b.block).collect(),
-            order,
-            merges,
-            slots,
-            port_slot,
-            port_owner: build.ports.iter().map(|p| p.owner).collect(),
-            port_kind: build.ports.iter().map(|p| p.kind).collect(),
-            port_type: build.ports.iter().map(|p| (p.type_id, p.type_name)).collect(),
-            knob,
-            mail_fns: build.ports.iter().map(|p| p.mail).collect(),
-            mailbox,
-            targets,
-            budget: (0..port_count).map(|_| Cell::new(0)).collect(),
-            inboxes,
-            interfaces,
-            realtime,
-            steps: 0,
-            disabled: Vec::new(),
-        })
+    /// Replace the tree with one built from `root`, keeping what can be
+    /// kept (see the type's docs). Takes effect immediately. Only for
+    /// workstreams not controlled by an engine; otherwise use
+    /// `Engine::rebuild`.
+    pub fn rebuild(&mut self, root: impl Block) -> Result<(), BuildError> {
+        let control = self.control.as_mut().ok_or(BuildError::Controlled)?;
+        control.rebuild(Box::new(root))?;
+        self.apply_commands();
+        self.collect_garbage();
+        Ok(())
     }
 
-    /// Run every block once, in dependency order. Inboxes deliver what had
-    /// arrived when the step began; later messages wait for the next step. A
-    /// block that panics is switched off (see [`disabled`](Self::disabled));
-    /// the rest carry on.
+    /// Run every block once, in dependency order. First applies pending
+    /// changes (rebuilds, knob settings, new mailbox links). Inboxes then
+    /// deliver what had arrived when the step began; later messages wait for
+    /// the next step. A block that panics is switched off (see
+    /// [`disabled`](Self::disabled)); the rest carry on.
     pub fn step(&mut self) {
-        for &inbox in &self.inboxes {
+        self.apply_commands();
+
+        let graph = &*self.graph;
+        for &inbox in &graph.inboxes {
             let inbox = inbox as usize;
-            let (Some(fns), Some(mailbox)) = (&self.mail_fns[inbox], &self.mailbox[inbox]) else { continue };
-            self.budget[inbox].set((fns.pending)(&**mailbox));
+            let (Some(fns), Some(mailbox)) = (graph.layout.port(inbox).mail, &graph.mailbox[inbox]) else { continue };
+            graph.budget[inbox].set((fns.pending)(&**mailbox));
         }
 
-        for &block in &self.order {
+        let graph = &mut *self.graph;
+        for &block in &graph.order {
             let block = block as usize;
-            for merge in &self.merges[block] {
-                let mut into = self.slots[merge.into].borrow_mut();
+            for merge in &graph.merges[block] {
+                let mut into = graph.slots[merge.into].borrow_mut();
                 (merge.clear)(&mut **into);
                 for &source in &merge.sources {
-                    (merge.merge)(&mut **into, &**self.slots[source].borrow(), merge.mode);
+                    (merge.merge)(&mut **into, &**graph.slots[source].borrow(), merge.mode);
                 }
             }
 
-            let Some(routine) = self.blocks[block].as_mut() else { continue };
+            let Some(routine) = graph.blocks[block].as_mut() else { continue };
             let io = Io {
                 block: block as u32,
-                slots: &self.slots,
-                port_slot: &self.port_slot,
-                port_owner: &self.port_owner,
-                mailbox: &self.mailbox,
-                targets: &self.targets,
-                budget: &self.budget,
+                slots: &graph.slots,
+                port_slot: &graph.port_slot,
+                port_owner: &graph.port_owner,
+                mailbox: &graph.mailbox,
+                targets: &self.targets.0,
+                budget: &graph.budget,
                 step: self.steps,
             };
             if catch_unwind(AssertUnwindSafe(|| routine.process(&io))).is_err() {
-                self.blocks[block] = None;
+                graph.blocks[block] = None;
                 self.disabled.push(block as u32);
             }
         }
         self.steps += 1;
+
+        // Free swapped-out graphs here, unless this thread is real-time
+        // (an engine frees those on its own thread).
+        if !self.graph.layout.realtime {
+            self.collect_garbage();
+        }
+    }
+
+    /// Apply what the control side sent, while there's room to send back
+    /// what it replaces. Moves pointers only: no allocation, no freeing.
+    fn apply_commands(&mut self) {
+        while self.queues.garbage.slots() > 0 {
+            let Ok(command) = self.queues.commands.pop() else { break };
+            let garbage = match command {
+                Command::Swap(mut swap) => {
+                    // Fresh instances take over the running ones' state
+                    // (`#[state]` fields, then `Block::carry_over`). A
+                    // switched-off (crashed) block has none: it starts fresh.
+                    for &block in &swap.carry_blocks {
+                        let block = block as usize;
+                        let running = self.graph.blocks.get_mut(block).and_then(Option::as_mut);
+                        let fresh = swap.graph.blocks.get_mut(block).and_then(Option::as_mut);
+                        if let (Some(running), Some(fresh)) = (running, fresh) {
+                            let previous: &mut dyn Any = &mut **running;
+                            fresh.carry_state(previous);
+                            fresh.carry_over(previous);
+                        }
+                    }
+                    for &(old, new) in &swap.keep_slots {
+                        let (old, new) = (&self.graph.slots[old as usize], &swap.graph.slots[new as usize]);
+                        std::mem::swap(&mut *old.borrow_mut(), &mut *new.borrow_mut());
+                    }
+                    std::mem::swap(&mut self.graph, &mut swap.graph);
+                    std::mem::swap(&mut self.targets, &mut swap.targets);
+                    self.disabled.clear();
+                    Garbage::Swap(swap)
+                }
+                Command::Targets(mut targets) => {
+                    std::mem::swap(&mut self.targets, &mut targets);
+                    Garbage::Targets(targets)
+                }
+                Command::Set { slot, mut value } => {
+                    if let Some(slot) = self.graph.slots.get(slot as usize) {
+                        std::mem::swap(&mut *slot.borrow_mut(), &mut value);
+                    }
+                    Garbage::Value(value)
+                }
+            };
+            // Can't fail: we checked for room.
+            let _ = self.queues.garbage.push(garbage);
+        }
+    }
+
+    /// Free what was swapped out (when not controlled by an engine).
+    pub fn collect_garbage(&mut self) {
+        if let Some(control) = &mut self.control {
+            control.collect_garbage();
+        }
     }
 
     /// Steps run so far.
@@ -262,193 +200,102 @@ impl Workstream {
 
     /// Whether this workstream was built with [`build_realtime`](Self::build_realtime).
     pub fn is_realtime(&self) -> bool {
-        self.realtime
+        self.graph.layout.realtime
     }
 
     /// The root block's identity.
     pub fn id(&self) -> BlockId {
-        self.id
+        self.graph.layout.root_id
     }
 
     /// The root block's dictionary: everything it exposes, with IDs.
     pub fn interfaces(&self) -> &[Interface] {
-        &self.interfaces
+        &self.graph.layout.interfaces
     }
 
     /// The root block, as its own type: the starting point for reaching
     /// handles from outside (`ws.get(ws.root::<Patch>()?.voice)`).
     pub fn root<R: Block>(&self) -> Option<&R> {
-        self.blocks.first()?.as_deref().and_then(|b| (b as &dyn Any).downcast_ref::<R>())
+        let root = *self.graph.layout.block_index.get(&self.graph.layout.root_id)?;
+        self.graph.blocks.get(root as usize)?.as_deref().and_then(|b| (b as &dyn Any).downcast_ref::<R>())
     }
 
     /// A block of this tree, as its own type, to read its handles. `None`
     /// for a handle of another tree or a block that was switched off.
     pub fn get<B: Block>(&self, child: Child<B>) -> Option<&B> {
-        if child.tree != self.tree {
+        if child.tree != self.graph.layout.tree {
             return None;
         }
-        self.blocks.get(child.index as usize)?.as_deref().and_then(|b| (b as &dyn Any).downcast_ref::<B>())
+        self.graph.blocks.get(child.index as usize)?.as_deref().and_then(|b| (b as &dyn Any).downcast_ref::<B>())
     }
 
     /// The current value of a port (an output, or what an input sees). It
     /// must be exposed by the root.
     pub fn read<T: 'static>(&self, port: impl ValuePort<T>) -> Result<Ref<'_, T>, AccessError> {
-        let port = self.handle(&port)?;
+        let port = self.graph.layout.typed::<T>(&port)?;
         Ok(self.value(port))
     }
 
     /// Like [`read`](Self::read), by ID (for tools working from data).
     pub fn read_id<T: 'static>(&self, id: InterfaceId) -> Result<Ref<'_, T>, AccessError> {
-        let port = self.by_id(id)?;
-        if self.port_kind[port].is_mailbox() {
-            return Err(AccessError::NotAPort(self.port_path[port].clone()));
+        let layout = &self.graph.layout;
+        let port = layout.by_id(id)?;
+        if layout.port(port).kind.is_mailbox() {
+            return Err(AccessError::NotAPort(layout.port(port).path.clone()));
         }
-        self.check_type::<T>(port)?;
+        layout.check_type::<T>(port)?;
         Ok(self.value(port))
     }
 
     /// Turn a knob: set the value of an unconnected input (exposed by the
-    /// root). Call between steps.
+    /// root). Call between steps, on the thread that steps it (from
+    /// elsewhere, use `Engine::set`).
     pub fn set<T: Send + 'static>(&mut self, input: In<T>, value: T) -> Result<(), AccessError> {
-        let port = self.handle(&input)?;
+        let port = self.graph.layout.typed::<T>(&input)?;
         self.set_port(port, value)
     }
 
     /// Like [`set`](Self::set), by ID.
     pub fn set_id<T: Send + 'static>(&mut self, id: InterfaceId, value: T) -> Result<(), AccessError> {
-        let port = self.by_id(id)?;
-        self.check_type::<T>(port)?;
+        let port = self.graph.layout.by_id(id)?;
+        self.graph.layout.check_type::<T>(port)?;
         self.set_port(port, value)
     }
 
     /// Messages an inbox (exposed by the root) lost to a full queue.
     pub fn dropped<M>(&self, inbox: Inbox<M>) -> Result<u64, AccessError> {
-        let port = self.handle(&inbox)?;
-        match (&self.mail_fns[port], &self.mailbox[port]) {
+        let layout = &self.graph.layout;
+        let port = layout.handle(&inbox)?;
+        match (layout.port(port).mail, &self.graph.mailbox[port]) {
             (Some(fns), Some(mailbox)) => Ok((fns.dropped)(&**mailbox)),
-            _ => Err(AccessError::NotAnInbox(self.port_path[port].clone())),
+            _ => Err(AccessError::NotAnInbox(layout.port(port).path.clone())),
         }
     }
 
-    /// Display paths of blocks switched off because they panicked.
+    /// Display paths of blocks switched off because they panicked (since
+    /// the last rebuild, which gives them a fresh start).
     pub fn disabled(&self) -> impl Iterator<Item = &str> {
-        self.disabled.iter().map(|&b| self.paths[b as usize].as_str())
+        let layout = &self.graph.layout;
+        self.disabled.iter().filter_map(|&b| Some(layout.blocks.get(b as usize)?.as_ref()?.path.as_str()))
     }
 
     fn value<T: 'static>(&self, port: usize) -> Ref<'_, T> {
-        let slot = &self.slots[self.port_slot[port] as usize];
+        let slot = &self.graph.slots[self.graph.port_slot[port] as usize];
         Ref::map(slot.borrow(), |v| (**v).downcast_ref::<T>().expect("type checked"))
     }
 
     fn set_port<T: Send + 'static>(&mut self, port: usize, value: T) -> Result<(), AccessError> {
-        if !self.knob[port] {
-            return Err(AccessError::NotAKnob(self.port_path[port].clone()));
-        }
-        *self.slots[self.port_slot[port] as usize].borrow_mut() = Box::new(value);
-        Ok(())
-    }
-
-    fn check_type<T: 'static>(&self, port: usize) -> Result<(), AccessError> {
-        let (type_id, type_name) = self.port_type[port];
-        if type_id != TypeId::of::<T>() {
-            return Err(AccessError::WrongType { path: self.port_path[port].clone(), actual: type_name });
-        }
+        let slot = self.graph.layout.knob_slot(port)?;
+        *self.graph.slots[slot].borrow_mut() = Box::new(value);
         Ok(())
     }
 
     // ---- for the engine ------------------------------------------------------------
 
-    pub(crate) fn tree(&self) -> u32 {
-        self.tree
+    /// Hand the control side over (to an engine).
+    pub(crate) fn take_control(&mut self) -> Option<Control> {
+        self.control.take()
     }
-
-    /// A handle's port, if it's from this tree and exposed by the root.
-    /// (Typed handles need no type check: the compiler did it.)
-    pub(crate) fn handle(&self, handle: &impl PortHandle) -> Result<usize, AccessError> {
-        if handle.port_tree() == u32::MAX {
-            return Err(AccessError::Unregistered);
-        }
-        if handle.port_tree() != self.tree {
-            return Err(AccessError::ForeignHandle);
-        }
-        let port = handle.port_index() as usize;
-        if !self.exposed.get(port).copied().unwrap_or(false) {
-            return Err(AccessError::NotExposed(self.port_path.get(port).cloned().unwrap_or_default()));
-        }
-        Ok(port)
-    }
-
-    pub(crate) fn by_id(&self, id: InterfaceId) -> Result<usize, AccessError> {
-        self.interfaces
-            .iter()
-            .find(|i| i.id == id)
-            .map(|i| i.port as usize)
-            .ok_or(AccessError::UnknownInterface(id))
-    }
-
-    pub(crate) fn path_of(&self, port: usize) -> &str {
-        &self.port_path[port]
-    }
-
-    pub(crate) fn kind(&self, port: usize) -> InterfaceKind {
-        self.port_kind[port]
-    }
-
-    pub(crate) fn type_of(&self, port: usize) -> (TypeId, &'static str) {
-        self.port_type[port]
-    }
-
-    pub(crate) fn mailbox_of(&self, port: usize) -> Option<AnyMailbox> {
-        self.mailbox[port].clone()
-    }
-
-    /// Whether dropping the outbox's message type runs code.
-    pub(crate) fn drops(&self, port: usize) -> bool {
-        self.mail_fns[port].is_some_and(|f| f.drops)
-    }
-
-    /// Connect the outbox `port` to a mailbox (of the same message type).
-    pub(crate) fn add_target(&mut self, port: usize, mailbox: AnyMailbox) -> bool {
-        match (&self.mail_fns[port], self.targets[port].as_deref_mut()) {
-            (Some(fns), Some(targets)) => (fns.add_target)(targets, mailbox),
-            _ => false,
-        }
-    }
-
-    /// The typed mailbox of the inbox `port`.
-    pub(crate) fn typed_mailbox<M: Message>(&self, port: usize) -> Option<Arc<Mailbox<M>>> {
-        self.mailbox[port].clone()?.downcast::<Mailbox<M>>().ok()
-    }
-}
-
-/// Topological order of all blocks: a block runs after every block whose
-/// outputs it reads. Kahn's algorithm, taking blocks in registration order
-/// whenever there's a choice, so the order is deterministic. (Mail links
-/// don't order anything: messages arrive by the next step.)
-fn execution_order(build: &Build) -> Result<Vec<u32>, BuildError> {
-    let count = build.blocks.len();
-    let owner = |port: u32| build.ports[port as usize].owner as usize;
-    let edges: Vec<(usize, usize)> = build.links.iter().map(|&(from, to)| (owner(from), owner(to))).collect();
-    let mut incoming = vec![0usize; count];
-    for &(_, to) in &edges {
-        incoming[to] += 1;
-    }
-    let mut done = vec![false; count];
-    let mut order = Vec::with_capacity(count);
-    while order.len() < count {
-        let Some(next) = (0..count).find(|&b| !done[b] && incoming[b] == 0) else {
-            let stuck = (0..count).filter(|&b| !done[b]).map(|b| build.blocks[b].path.clone()).collect();
-            return Err(BuildError::Cycle(stuck));
-        };
-        done[next] = true;
-        order.push(next as u32);
-        for &(from, to) in &edges {
-            if from == next {
-                incoming[to] -= 1;
-            }
-        }
-    }
-    Ok(order)
 }
 
 /// Handles whose value can be read from outside: [`In`] and [`Out`].
@@ -465,6 +312,8 @@ pub enum AccessError {
     Unregistered,
     #[error("the handle belongs to a different workstream")]
     ForeignHandle,
+    #[error("the handle's interface no longer exists (removed by a rebuild)")]
+    Gone,
     #[error("{0:?} isn't exposed by the root block (private somewhere on the way up?)")]
     NotExposed(String),
     #[error("{path:?} carries {actual}")]
@@ -475,6 +324,8 @@ pub enum AccessError {
     NotAPort(String),
     #[error("{0:?} isn't an inbox")]
     NotAnInbox(String),
+    #[error("the workstream isn't keeping up with changes (is it being stepped?)")]
+    Busy,
 }
 
 /// A block's access to its ports and mailboxes during [`Block::process`].
@@ -516,10 +367,10 @@ impl Io<'_> {
 
     /// Send `message` to every inbox linked to `outbox` (cloned for all but
     /// the last). Never blocks: a full queue drops its oldest message.
-    pub fn send<M: Clone + 'static>(&self, outbox: Outbox<M>, message: M) {
+    pub fn send<M: Message>(&self, outbox: Outbox<M>, message: M) {
         let port = self.own(outbox.index);
-        let Some(targets) = self.targets[port].as_deref().and_then(|t| t.downcast_ref::<Vec<Arc<Mailbox<M>>>>())
-        else {
+        let targets = self.targets.get(port).and_then(Option::as_deref);
+        let Some(targets) = targets.and_then(|t| t.downcast_ref::<Vec<Arc<Mailbox<M>>>>()) else {
             return;
         };
         if let Some((last, rest)) = targets.split_last() {

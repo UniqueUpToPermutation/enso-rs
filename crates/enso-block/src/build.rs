@@ -1,18 +1,26 @@
 //! Building a block tree: registration, loading, interface dictionaries,
-//! linking. Everything here runs before the workstream starts stepping.
+//! linking. Everything here runs before the workstream steps (off the
+//! stepping thread when rebuilding).
 //!
 //! Identity is by IDs (design §0): every block has a [`BlockId`], every
 //! interface a [`Key`] within its block. Labels only build display paths.
+//!
+//! **Indices are stable across rebuilds:** when a tree is rebuilt, a block
+//! or interface that existed before gets the same internal index as before
+//! (looked up by its ID in the previous [`Layout`]); new ones get fresh
+//! indices, and indices are never reused. That's what lets a running block
+//! keep its handles (and its state) when the graph around it is swapped.
 
 use std::{
     any::{Any, TypeId},
+    collections::HashMap,
     ops::Index,
 };
 
 use crate::{
     Block, BlockError, BlockId, Child, Delivery, In, Inbox, InterfaceId, Key, Merge, MergeMode, Message, Out,
     Outbox, PortHandle, Spec,
-    ids::next_tree,
+    graph::Layout,
     mail::{MailFns, mail_fns},
     merge::{ClearFn, MergeFn, clear_erased, merge_erased},
 };
@@ -82,6 +90,10 @@ pub enum BuildError {
          (use a message type that owns no memory)"
     )]
     NotRealtimeSafe { path: String, type_name: &'static str },
+    #[error("this workstream is controlled by an engine; rebuild it through the engine")]
+    Controlled,
+    #[error("the workstream isn't keeping up with changes (is it being stepped?)")]
+    Busy,
 }
 
 // ---- build state -------------------------------------------------------------------
@@ -89,6 +101,9 @@ pub enum BuildError {
 pub(crate) struct BlockEntry {
     pub block: Option<Box<dyn Block>>,
     pub id: BlockId,
+    /// The block's Rust type (to decide whether a running instance can be
+    /// kept across a rebuild).
+    pub type_id: TypeId,
     pub label: String,
     /// Labels from the root, for display: "" for the root, "voice/osc" below.
     pub path: String,
@@ -123,40 +138,67 @@ pub(crate) struct PortEntry {
 }
 
 pub(crate) struct Build {
-    /// Tags this tree's handles.
+    /// Tags this tree's handles (the same across rebuilds).
     pub tree: u32,
-    pub blocks: Vec<BlockEntry>,
-    pub ports: Vec<PortEntry>,
+    /// Sparse: indexed by block index; holes are blocks of earlier builds.
+    pub blocks: Vec<Option<BlockEntry>>,
+    /// Sparse: indexed by port index.
+    pub ports: Vec<Option<PortEntry>>,
+    /// Block indices in registration order (parents before children).
+    pub order: Vec<u32>,
     /// (output port, input port)
     pub links: Vec<(u32, u32)>,
     /// (outbox, inbox) within this tree.
     pub mail_links: Vec<(u32, u32)>,
     pub errors: Vec<BuildError>,
+    /// Indices from the previous build, by identity.
+    previous_blocks: HashMap<BlockId, u32>,
+    previous_ports: HashMap<InterfaceId, u32>,
 }
 
 impl Build {
     /// Run every stage up to linking. `root_id` identifies the root block;
-    /// every other ID derives from it.
-    pub fn new(root: Box<dyn Block>, root_id: BlockId) -> Result<Self, BuildError> {
+    /// every other ID derives from it. With `previous`, existing blocks and
+    /// interfaces keep their indices.
+    pub fn new(
+        root: Box<dyn Block>,
+        root_id: BlockId,
+        tree: u32,
+        previous: Option<&Layout>,
+    ) -> Result<Self, BuildError> {
         let mut build = Build {
-            tree: next_tree(),
+            tree,
             blocks: Vec::new(),
             ports: Vec::new(),
+            order: Vec::new(),
             links: Vec::new(),
             mail_links: Vec::new(),
             errors: Vec::new(),
+            previous_blocks: previous.map(|p| p.block_index.clone()).unwrap_or_default(),
+            previous_ports: previous.map(|p| p.port_index.clone()).unwrap_or_default(),
         };
-        build.blocks.push(BlockEntry::new(root_id, String::new(), String::new()));
+        // Never reuse an index of the previous build (a kept block may still
+        // hold a handle to it).
+        let (block_floor, port_floor) = previous.map_or((0, 0), |p| (p.blocks.len(), p.ports.len()));
+        build.blocks.resize_with(block_floor, || None);
+        build.ports.resize_with(port_floor, || None);
+
+        let root_index = build.alloc_block(root_id);
+        build.place_block(root_index, BlockEntry::new(root_id, String::new(), String::new()));
         let mut root = root;
-        let mut r = Registrar { build: &mut build, block: 0 };
+        let mut r = Registrar { build: &mut build, block: root_index };
         root.register_ports(&mut r);
         root.register(&mut r);
-        build.blocks[0].block = Some(root);
+        let type_id = (*root).type_id();
+        let entry = build.block_mut(root_index);
+        entry.type_id = type_id;
+        entry.block = Some(root);
         build.check()?;
 
-        // Load: children before parents (they're registered after them).
-        for id in (0..build.blocks.len()).rev() {
-            let entry = &mut build.blocks[id];
+        // Load: children before parents.
+        for i in (0..build.order.len()).rev() {
+            let index = build.order[i];
+            let entry = build.block_mut(index);
             let (path, block_id) = (entry.path.clone(), entry.id);
             let block = entry.block.as_mut().expect("present outside link");
             block
@@ -165,17 +207,19 @@ impl Build {
         }
 
         // Dictionaries: children first, so parents can include them.
-        for id in (0..build.blocks.len()).rev() {
-            build.make_dictionary(id as u32);
+        for i in (0..build.order.len()).rev() {
+            let index = build.order[i];
+            build.make_dictionary(index);
         }
         build.check()?;
 
-        for id in 0..build.blocks.len() {
-            let mut block = build.blocks[id].block.take().expect("present");
-            let result = block.link(&mut Linker { build: &mut build, block: id as u32 });
-            build.blocks[id].block = Some(block);
+        for i in 0..build.order.len() {
+            let index = build.order[i];
+            let mut block = build.block_mut(index).block.take().expect("present");
+            let result = block.link(&mut Linker { build: &mut build, block: index });
+            build.block_mut(index).block = Some(block);
             if let Err(source) = result {
-                return Err(BuildError::Link { path: build.blocks[id].path.clone(), source });
+                return Err(BuildError::Link { path: build.block(index).path.clone(), source });
             }
         }
         Ok(build)
@@ -185,22 +229,70 @@ impl Build {
         if self.errors.is_empty() { Ok(()) } else { Err(self.errors.remove(0)) }
     }
 
-    /// For display: the port's labels from the root.
-    pub fn port_path(&self, port: u32) -> String {
-        let p = &self.ports[port as usize];
-        join(&self.blocks[p.owner as usize].path, &p.label)
+    pub fn block(&self, index: u32) -> &BlockEntry {
+        self.blocks[index as usize].as_ref().expect("live block")
     }
 
-    fn make_dictionary(&mut self, id: u32) {
-        let entry = &self.blocks[id as usize];
+    pub fn block_mut(&mut self, index: u32) -> &mut BlockEntry {
+        self.blocks[index as usize].as_mut().expect("live block")
+    }
+
+    pub fn port(&self, index: u32) -> &PortEntry {
+        self.ports[index as usize].as_ref().expect("live port")
+    }
+
+    /// Live ports with their indices.
+    pub fn live_ports(&self) -> impl Iterator<Item = (u32, &PortEntry)> {
+        self.ports.iter().enumerate().filter_map(|(i, p)| Some((i as u32, p.as_ref()?)))
+    }
+
+    /// The index for block `id`: its previous index, or a fresh one.
+    fn alloc_block(&mut self, id: BlockId) -> u32 {
+        let fresh = self.blocks.len() as u32;
+        let index = match self.previous_blocks.get(&id) {
+            Some(&index) if self.blocks.get(index as usize).is_some_and(Option::is_none) => index,
+            _ => fresh,
+        };
+        if index == fresh {
+            self.blocks.push(None);
+        }
+        index
+    }
+
+    fn place_block(&mut self, index: u32, entry: BlockEntry) {
+        self.blocks[index as usize] = Some(entry);
+        self.order.push(index);
+    }
+
+    /// The index for interface `id`: its previous index, or a fresh one.
+    fn alloc_port(&mut self, id: InterfaceId) -> u32 {
+        let fresh = self.ports.len() as u32;
+        let index = match self.previous_ports.get(&id) {
+            Some(&index) if self.ports.get(index as usize).is_some_and(Option::is_none) => index,
+            _ => fresh,
+        };
+        if index == fresh {
+            self.ports.push(None);
+        }
+        index
+    }
+
+    /// For display: the port's labels from the root.
+    pub fn port_path(&self, port: u32) -> String {
+        let p = self.port(port);
+        join(&self.block(p.owner).path, &p.label)
+    }
+
+    fn make_dictionary(&mut self, index: u32) {
+        let entry = self.block(index);
         let hidden = |port: u32| entry.hidden.contains(&port);
         let mut dictionary: Vec<Interface> = Vec::new();
         for &port in entry.ports.iter().filter(|&&p| !hidden(p)) {
-            let p = &self.ports[port as usize];
+            let p = self.port(port);
             dictionary.push(self.interface(InterfaceId { block: entry.id, key: p.key }, p.label.clone(), port));
         }
         for &child in &entry.children {
-            let child = &self.blocks[child as usize];
+            let child = self.block(child);
             for interface in child.dictionary.iter().filter(|i| !hidden(i.port)) {
                 dictionary.push(Interface { path: join(&child.label, &interface.path), ..interface.clone() });
             }
@@ -216,17 +308,17 @@ impl Build {
         }
         let path = entry.path.clone();
         self.errors.extend(errors.into_iter().map(|message| BuildError::Register { path: path.clone(), message }));
-        self.blocks[id as usize].dictionary = dictionary;
+        self.block_mut(index).dictionary = dictionary;
     }
 
     fn interface(&self, id: InterfaceId, path: String, port: u32) -> Interface {
-        let p = &self.ports[port as usize];
+        let p = self.port(port);
         Interface { id, path, kind: p.kind, type_name: p.type_name, merge: p.merge, port, type_id: p.type_id }
     }
 }
 
 /// `a/b`, or just `b` when `a` is empty (the root).
-fn join(a: &str, b: &str) -> String {
+pub(crate) fn join(a: &str, b: &str) -> String {
     if a.is_empty() { b.to_owned() } else { format!("{a}/{b}") }
 }
 
@@ -235,6 +327,7 @@ impl BlockEntry {
         Self {
             block: None,
             id,
+            type_id: TypeId::of::<()>(),
             label,
             path,
             children: Vec::new(),
@@ -259,12 +352,12 @@ pub struct Registrar<'a> {
 impl Registrar<'_> {
     /// This block's identity.
     pub fn id(&self) -> BlockId {
-        self.build.blocks[self.block as usize].id
+        self.build.block(self.block).id
     }
 
     /// For display: this block's labels from the root (`""` for the root).
     pub fn path(&self) -> &str {
-        &self.build.blocks[self.block as usize].path
+        &self.build.block(self.block).path
     }
 
     /// An input that accepts one link. `default` is its value while
@@ -332,21 +425,26 @@ impl Registrar<'_> {
         mut block: B,
     ) -> Child<B> {
         let label = label.into().into_owned();
-        let taken = self.build.blocks[self.block as usize]
-            .children
-            .iter()
-            .any(|&c| self.build.blocks[c as usize].id == id);
+        let taken = self.build.blocks.iter().flatten().any(|b| b.id == id);
         if taken {
-            self.error(format!("two children have the same ID {id} (the second is labelled {label:?})"));
+            self.error(format!("two blocks have the same ID {id} (the second is labelled {label:?})"));
         }
         let path = join(self.path(), &label);
-        let index = self.build.blocks.len() as u32;
-        self.build.blocks.push(BlockEntry::new(id, label, path));
-        self.build.blocks[self.block as usize].children.push(index);
+        // A duplicate gets a fresh index so it can't overwrite the first.
+        let index = if taken {
+            self.build.blocks.push(None);
+            self.build.blocks.len() as u32 - 1
+        } else {
+            self.build.alloc_block(id)
+        };
+        self.build.place_block(index, BlockEntry::new(id, label, path));
+        self.build.block_mut(self.block).children.push(index);
         let mut r = Registrar { build: self.build, block: index };
         block.register_ports(&mut r);
         block.register(&mut r);
-        self.build.blocks[index as usize].block = Some(Box::new(block));
+        let entry = self.build.block_mut(index);
+        entry.type_id = TypeId::of::<B>();
+        entry.block = Some(Box::new(block));
         Child::new(index, self.build.tree)
     }
 
@@ -362,7 +460,7 @@ impl Registrar<'_> {
     /// see it.
     pub fn private(&mut self, port: impl PortHandle) {
         let port = port.port_index();
-        self.build.blocks[self.block as usize].hidden.push(port);
+        self.build.block_mut(self.block).hidden.push(port);
     }
 
     /// Also expose `port` (own, or exposed by a child) as an interface of
@@ -372,30 +470,38 @@ impl Registrar<'_> {
         let spec = spec.into();
         self.check_key(spec.key, &spec.label);
         let port = port.port_index();
-        self.build.blocks[self.block as usize].aliases.push((spec.key, spec.label.into_owned(), port));
+        self.build.block_mut(self.block).aliases.push((spec.key, spec.label.into_owned(), port));
     }
 
     fn add(&mut self, spec: Spec, entry: PortEntry) -> u32 {
-        self.check_key(spec.key, &spec.label);
-        let index = self.build.ports.len() as u32;
-        self.build.ports.push(PortEntry { owner: self.block, key: spec.key, label: spec.label.into_owned(), ..entry });
-        self.build.blocks[self.block as usize].ports.push(index);
+        let clash = self.check_key(spec.key, &spec.label);
+        let index = if clash {
+            self.build.ports.push(None);
+            self.build.ports.len() as u32 - 1
+        } else {
+            self.build.alloc_port(InterfaceId { block: self.id(), key: spec.key })
+        };
+        self.build.ports[index as usize] =
+            Some(PortEntry { owner: self.block, key: spec.key, label: spec.label.into_owned(), ..entry });
+        self.build.block_mut(self.block).ports.push(index);
         index
     }
 
     /// Keys identify interfaces within a block, so they must be unique
-    /// (across ports, mailboxes and aliases). Labels may repeat.
-    fn check_key(&mut self, key: Key, label: &str) {
-        let entry = &self.build.blocks[self.block as usize];
+    /// (across ports, mailboxes and aliases). Labels may repeat. Returns
+    /// whether `key` clashes.
+    fn check_key(&mut self, key: Key, label: &str) -> bool {
+        let entry = self.build.block(self.block);
         let clash = entry
             .ports
             .iter()
-            .map(|&p| (self.build.ports[p as usize].key, self.build.ports[p as usize].label.clone()))
+            .map(|&p| (self.build.port(p).key, self.build.port(p).label.clone()))
             .chain(entry.aliases.iter().map(|(k, l, _)| (*k, l.clone())))
             .find(|(k, _)| *k == key);
-        if let Some((_, other)) = clash {
+        if let Some((_, other)) = &clash {
             self.error(format!("{label:?} and {other:?} have the same key {key:?} (give one an explicit id)"));
         }
+        clash.is_some()
     }
 
     fn error(&mut self, message: String) {
@@ -482,24 +588,24 @@ impl Linker<'_> {
 
     /// The linking block's identity.
     pub fn id(&self) -> BlockId {
-        self.build.blocks[self.block as usize].id
+        self.build.block(self.block).id
     }
 
     /// A child's identity (to build [`InterfaceId`]s for `connect_ids`).
     pub fn id_of<B: Block>(&self, child: Child<B>) -> BlockId {
         child_of(self.build, child);
-        self.build.blocks[child.index as usize].id
+        self.build.block(child.index).id
     }
 
     /// The interfaces this block's children expose (what `connect_ids`
     /// accepts), with display paths relative to this block.
     pub fn available(&self) -> Vec<Interface> {
-        let entry = &self.build.blocks[self.block as usize];
+        let entry = self.build.block(self.block);
         entry
             .children
             .iter()
             .flat_map(|&c| {
-                let child = &self.build.blocks[c as usize];
+                let child = self.build.block(c);
                 child.dictionary.iter().map(|i| Interface { path: join(&child.label, &i.path), ..i.clone() })
             })
             .collect()
@@ -510,30 +616,33 @@ impl Linker<'_> {
             Err(LinkError::Unregistered)
         } else if handle.port_tree() != self.build.tree {
             Err(LinkError::ForeignHandle)
+        } else if self.build.ports.get(handle.port_index() as usize).is_none_or(Option::is_none) {
+            // A handle of an earlier build whose interface no longer exists.
+            Err(LinkError::Unregistered)
         } else {
             Ok(handle.port_index())
         }
     }
 
     fn lookup(&self, id: InterfaceId) -> Result<u32, LinkError> {
-        let entry = &self.build.blocks[self.block as usize];
+        let entry = self.build.block(self.block);
         entry
             .children
             .iter()
-            .flat_map(|&c| &self.build.blocks[c as usize].dictionary)
+            .flat_map(|&c| &self.build.block(c).dictionary)
             .find(|i| i.id == id)
             .map(|i| i.port)
             .ok_or(LinkError::UnknownInterface(id))
     }
 
     fn visible(&self, port: u32) -> bool {
-        let entry = &self.build.blocks[self.block as usize];
-        entry.children.iter().any(|&c| self.build.blocks[c as usize].dictionary.iter().any(|i| i.port == port))
+        let entry = self.build.block(self.block);
+        entry.children.iter().any(|&c| self.build.block(c).dictionary.iter().any(|i| i.port == port))
     }
 
     fn link(&mut self, from: u32, to: u32) -> Result<(), LinkError> {
         let b = &*self.build;
-        let (f, t) = (&b.ports[from as usize], &b.ports[to as usize]);
+        let (f, t) = (b.port(from), b.port(to));
         let mail = match (f.kind, t.kind) {
             (InterfaceKind::Out, InterfaceKind::In) => false,
             (InterfaceKind::Outbox, InterfaceKind::Inbox) => true,
@@ -580,7 +689,7 @@ impl<B: Block> Index<Child<B>> for Linker<'_> {
 
 fn child_of<B: Block>(build: &Build, child: Child<B>) -> &B {
     let block = (child.tree == build.tree)
-        .then(|| build.blocks.get(child.index as usize).and_then(|e| e.block.as_deref()))
+        .then(|| build.blocks.get(child.index as usize)?.as_ref()?.block.as_deref())
         .flatten();
     block
         .and_then(|b| (b as &dyn Any).downcast_ref::<B>())

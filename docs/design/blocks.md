@@ -71,6 +71,15 @@ composites. An execution engine runs the computation.
     derived from the field name; `id = N` pins one so the field can be
     renamed without breaking saved data.
 25. **Block instances are identified by full UUIDs.**
+26. *(Agent, pending owner review)* **Rebuilding separates configuration from
+    state.** A rebuild always runs the *fresh* block instances, so new
+    configuration takes effect. State survives only where declared: fields
+    marked `#[state]` (moved over by the derive) and an optional
+    `Block::carry_over` hook, for blocks with the same `BlockId` and Rust
+    type. Knob settings, output values, inbox mailboxes and engine-made
+    links carry over automatically; handles stay valid (stable internal
+    indices). Why: keeping the old instance (the first implementation)
+    also kept its old configuration, so a rebuild's changes didn't apply.
 
 ## 0. Identity
 
@@ -414,9 +423,9 @@ No blocking questions remain for a first implementation. Deferred:
 2. ✅ **Mailboxes and the engine:** `Inbox`/`Outbox`, Queue (drop-oldest) and
    Latest policies, `RealtimeMessage`, `Engine` with several workstreams and
    `connect_mail` (by handle; by `InterfaceId` after decision 23).
-3. **Swap while running:** relink → compile → swap between steps, keeping
+3. ✅ **Swap while running:** relink → compile → swap between steps, keeping
    block state. That's the existing `enso-audio` command/garbage mechanism,
-   generalised.
+   generalised (decision 26).
 4. **Retrofit `enso-audio`** onto it (§10). The offline-rendering and
    no-alloc tests must pass at every step.
 5. **The ECS and the sim workstream** (§8), feeding `RenderWorld` to the

@@ -9,7 +9,7 @@ use syn::{
     Data, DeriveInput, Expr, Field, Fields, Ident, LitInt, LitStr, Type, parse_macro_input, spanned::Spanned,
 };
 
-#[proc_macro_derive(Ports, attributes(input, output, inbox, outbox, child, private))]
+#[proc_macro_derive(Ports, attributes(input, output, inbox, outbox, child, private, state))]
 pub fn derive_ports(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand(&input) {
@@ -52,15 +52,30 @@ fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
 
     // Report every bad field at once, not just the first.
     let mut ports = Vec::new();
+    let mut state = Vec::new();
     let mut errors: Option<syn::Error> = None;
     for field in fields {
-        match parse_field(field) {
-            Ok(Some(port)) => ports.push(port),
-            Ok(None) => {}
-            Err(err) => match &mut errors {
+        let is_state = field.attrs.iter().any(|a| a.path().is_ident("state"));
+        let result = match parse_field(field) {
+            Ok(Some(_)) if is_state => {
+                Err(syn::Error::new(field.span(), "#[state] goes on plain fields, not ports, mailboxes or children"))
+            }
+            Ok(Some(port)) => {
+                ports.push(port);
+                Ok(())
+            }
+            Ok(None) if is_state => {
+                state.push(field.ident.clone().expect("named fields"));
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = result {
+            match &mut errors {
                 Some(errors) => errors.combine(err),
                 None => errors = Some(err),
-            },
+            }
         }
     }
     if let Some(errors) = errors {
@@ -110,6 +125,18 @@ fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
         quote! { #register #private }
     });
 
+    // On a rebuild, `#[state]` fields move over from the running instance.
+    // Swapping (not cloning) so it never allocates on the stepping thread.
+    let carry = (!state.is_empty()).then(|| {
+        quote! {
+            fn carry_state(&mut self, previous: &mut dyn ::core::any::Any) {
+                if let ::core::option::Option::Some(previous) = previous.downcast_mut::<Self>() {
+                    #( ::core::mem::swap(&mut self.#state, &mut previous.#state); )*
+                }
+            }
+        }
+    });
+
     let ident = &input.ident;
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     Ok(quote! {
@@ -118,6 +145,7 @@ fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
                 let _ = &r; // silence "unused" for blocks without annotated fields
                 #(#statements)*
             }
+            #carry
         }
     })
 }

@@ -1,9 +1,10 @@
 # enso-block
 
 Implementation of [design/blocks.md](../design/blocks.md), build-order
-steps 1–2: blocks, ports, interfaces, linking, a single-threaded
-`Workstream`, `#[derive(Ports)]`, mailboxes and the `Engine`.
-**Not yet:** swapping while running, delay blocks, the ECS.
+steps 1–3: blocks, ports, interfaces, linking, a single-threaded
+`Workstream`, `#[derive(Ports)]`, mailboxes, the `Engine`, and rebuilding
+while running. **Not yet:** delay blocks, the ECS, moving `enso-audio`
+onto blocks.
 
 ## Files
 
@@ -122,6 +123,47 @@ even with no annotated fields, because `Ports` is a supertrait.
   `Send`); `step_all()` steps all of them in order on one thread.
   Connections are made before the workstreams start; changing them while
   running is step 3.
+
+## Swapping while running (step 3)
+
+- **Control / runner split** (`control.rs`, like `enso-audio`'s
+  engine/processor). `Workstream` is the runner (graph + target table +
+  queue ends). Its `Control` (layout, target lists, engine-made links, queue
+  ends) stays with it until `Engine::add` takes it over; the engine keeps
+  it even after `take`.
+- `Command`s (control → runner, `rtrb`): `Swap(Box<Swap>)`,
+  `Targets(Box<TargetTable>)`, `Set { slot, value }`. They're applied at
+  the **start of `step`** by moving pointers only, and only while the
+  garbage queue has room. What they replace comes back as `Garbage` and is
+  freed by `Control::collect_garbage` (engine methods call it; standalone
+  non-real-time workstreams call it after each step).
+- **Stable indices** (`build.rs`): `Build::new(.., previous: Some(&Layout))`
+  gives each block and interface whose ID existed before the same index;
+  new ones get fresh indices; indices are **never reused**. So
+  `build.blocks` and `build.ports` are sparse (`Option`), with
+  `build.order` holding registration order. Handles from before a rebuild
+  stay valid; a handle to a removed interface gives `AccessError::Gone`.
+- **What carries over** (`Swap`):
+  - **The fresh instance always runs,** so configuration and child handles
+    come from the new build.
+  - `carry_blocks` (same `BlockId` and Rust type): the runner calls
+    `fresh.carry_state(old)` (derived: swaps `#[state]` fields), then
+    `fresh.carry_over(old)` (optional hand-written hook). The old instance
+    goes back as garbage. A crashed (switched-off) block starts fresh.
+  - `keep_slots`: values of outputs and knobs whose port still exists
+    with the same ID, kind and type (the slot boxes are swapped).
+  - **Inbox mailboxes** are reused (`compile(.., previous)`), so
+    `MailSender`s and other workstreams' links keep working.
+  - **Engine-made links** live in `Control::external` by outbox
+    `InterfaceId` and are re-added when compiling.
+- `Layout` (`graph.rs`, `Arc`-shared): everything both sides need to check
+  handles and IDs (`handle`, `typed`, `by_id`, `knob_slot`), plus the
+  per-port slot, mailbox and `MailFns`. Engine methods use the control's
+  layout, so they work while the runner is on another thread.
+- `tests/swap.rs` covers each rule (including rebuilding and setting
+  knobs while a thread steps the runner). `tests/no_alloc.rs` proves that
+  stepping, including applying swaps, knob settings and new links, never
+  allocates on a real-time workstream.
 
 ## Identity (decisions 23–25)
 

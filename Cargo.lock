@@ -1231,9 +1231,11 @@ dependencies = [
 name = "enso-block"
 version = "0.1.0"
 dependencies = [
+ "assert_no_alloc",
  "crossbeam-queue",
  "enso-block-derive",
  "enso-core",
+ "rtrb",
  "thiserror 2.0.21",
  "uuid",
 ]

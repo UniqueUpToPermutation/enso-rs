@@ -299,12 +299,12 @@ fn engine_errors() {
     // A workstream that isn't in this engine.
     let stray = Workstream::build(Collector::default()).unwrap();
     let stray_in = stray.root::<Collector>().unwrap().input;
-    assert_eq!(engine.connect_mail(out, stray_in), Err(EngineError::ForeignHandle));
-    assert_eq!(engine.sender(stray_in).err(), Some(EngineError::ForeignHandle));
+    assert!(matches!(engine.connect_mail(out, stray_in), Err(EngineError::ForeignHandle)));
+    assert!(matches!(engine.sender(stray_in), Err(EngineError::ForeignHandle)));
     assert!(matches!(engine.root::<Collector>(a), Err(EngineError::Access(_))), "wrong root type");
 
     let missing = InterfaceId { block: engine.workstream(a).unwrap().id(), key: Key::named("nope") };
-    assert_eq!(engine.sender_id::<u32>(missing).err(), Some(EngineError::UnknownInterface(missing)));
+    assert!(matches!(engine.sender_id::<u32>(missing), Err(EngineError::UnknownInterface(id)) if id == missing));
 }
 
 #[test]

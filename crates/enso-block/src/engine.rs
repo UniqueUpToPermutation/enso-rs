@@ -1,16 +1,18 @@
-//! [`Engine`]: the workstreams of a process and the mailbox links between
-//! them.
+//! [`Engine`]: the workstreams of a process, the mailbox links between
+//! them, and changes to them while they run.
 
 use std::any::TypeId;
 
 use crate::{
-    AccessError, Block, Child, Delivery, Inbox, InterfaceId, InterfaceKind, MailReceiver, MailSender, Message,
-    Outbox, PortHandle, Workstream, WorkstreamId,
-    mail::receiver,
+    AccessError, Block, BuildError, Child, Delivery, In, Inbox, InterfaceId, InterfaceKind, MailReceiver,
+    MailSender, Message, Outbox, PortHandle, Workstream, WorkstreamId,
+    control::Control,
+    graph::Layout,
+    mail::{Mailbox, receiver},
 };
 
 /// Engine failures. Paths in messages are display labels.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("no workstream {0:?} in this engine")]
     UnknownWorkstream(WorkstreamId),
@@ -18,8 +20,12 @@ pub enum EngineError {
     ForeignHandle,
     #[error("no workstream in this engine exposes {0:?}")]
     UnknownInterface(InterfaceId),
+    #[error("the workstream has been taken out to be stepped elsewhere; get handles before `take`")]
+    Taken,
     #[error(transparent)]
     Access(#[from] AccessError),
+    #[error(transparent)]
+    Build(#[from] BuildError),
     #[error("{0:?} must be an outbox")]
     NotAnOutbox(String),
     #[error("{0:?} must be an inbox")]
@@ -33,7 +39,16 @@ pub enum EngineError {
     NotRealtimeSafe { path: String, type_name: &'static str },
 }
 
-/// The workstreams of a process, and the mailbox links between them.
+struct Entry {
+    label: String,
+    /// The control side: always here.
+    control: Control,
+    /// The stepping side, until it's taken to its own thread.
+    runner: Option<Workstream>,
+}
+
+/// The workstreams of a process, the mailbox links between them, and
+/// changes to them while they run.
 ///
 /// ```ignore
 /// let mut engine = Engine::new();
@@ -44,17 +59,28 @@ pub enum EngineError {
 /// let visuals = engine.get(engine.root::<RenderRoot>(render)?.visuals)?;
 /// engine.connect_mail(meter.level, visuals.level)?;      // typed handles
 /// let midi = engine.sender(meter.notes)?;                 // for the MIDI thread
-/// let audio = engine.take(audio).unwrap();                // move to its thread
+/// let audio_runner = engine.take(audio).unwrap();         // move to its thread
+///
+/// // Later, while it runs:
+/// engine.rebuild(audio, AudioRoot::with_more_voices())?;  // swapped in at its next step
+/// engine.set(meter.gain, 0.5)?;                           // a knob, from here
+/// engine.collect_garbage();                               // free what it swapped out
 /// ```
 ///
-/// Handles know their workstream, so connecting needs nothing else. Data
-/// (patch files, the editor) uses [`InterfaceId`]s instead
-/// (`connect_mail_ids`). Only mailboxes connect workstreams: the engine
-/// has no way to link `In`/`Out` across them (decision 5).
+/// The engine keeps each workstream's **control side** even after the
+/// stepping side is taken to another thread: rebuilding, connecting
+/// mailboxes and setting knobs all work at any time. Changes travel through
+/// a lock-free queue and apply at the start of the workstream's next step;
+/// what they replace comes back to be freed by
+/// [`collect_garbage`](Self::collect_garbage) (called by every method).
+///
+/// Handles know their workstream, so connecting needs nothing else, and they
+/// stay valid across rebuilds. Data (patch files, the editor) uses
+/// [`InterfaceId`]s instead (`*_ids` methods). Only mailboxes connect
+/// workstreams (decision 5).
 #[derive(Default)]
 pub struct Engine {
-    /// (label, workstream)
-    workstreams: Vec<(String, Workstream)>,
+    entries: Vec<Entry>,
 }
 
 impl Engine {
@@ -62,16 +88,43 @@ impl Engine {
         Self::default()
     }
 
-    /// Add a built workstream. `label` is for display only.
-    pub fn add(&mut self, label: &str, workstream: Workstream) -> WorkstreamId {
-        let id = WorkstreamId(workstream.tree());
-        self.workstreams.push((label.to_owned(), workstream));
+    /// Add a built workstream (the engine takes over its control side).
+    /// `label` is for display only.
+    pub fn add(&mut self, label: &str, mut workstream: Workstream) -> WorkstreamId {
+        let control = workstream.take_control().expect("a fresh workstream has its control side");
+        let id = WorkstreamId(control.layout.tree);
+        self.entries.push(Entry { label: label.to_owned(), control, runner: Some(workstream) });
         id
+    }
+
+    /// Replace a workstream's tree with one built from `root`, while it runs.
+    /// Built here; swapped in at the workstream's next step. Blocks that
+    /// still exist with the same type and interfaces keep running with their
+    /// state; knobs, outputs, inbox mailboxes and engine-made links carry
+    /// over; handles stay valid.
+    pub fn rebuild(&mut self, id: WorkstreamId, root: impl Block) -> Result<(), EngineError> {
+        self.collect_garbage();
+        let entry = self.entry_mut(id)?;
+        entry.control.rebuild(Box::new(root))?;
+        Ok(())
+    }
+
+    /// Set a knob (an unconnected input), from here, while the workstream
+    /// runs anywhere. Applies at its next step.
+    pub fn set<T: Send + 'static>(&mut self, input: In<T>, value: T) -> Result<(), EngineError> {
+        self.collect_garbage();
+        let (index, port) = self.locate(&input)?;
+        let control = &mut self.entries[index].control;
+        control.layout.check_type::<T>(port)?;
+        let slot = control.layout.knob_slot(port)?;
+        control.set(slot, Box::new(value))?;
+        Ok(())
     }
 
     /// Link an outbox to an inbox, in the same workstream or different
     /// ones. Both must be exposed by their roots.
     pub fn connect_mail<M: Message>(&mut self, from: Outbox<M>, to: Inbox<M>) -> Result<(), EngineError> {
+        self.collect_garbage();
         let (from_ws, from_port) = self.locate(&from)?;
         let (to_ws, to_port) = self.locate(&to)?;
         self.connect_ports(from_ws, from_port, to_ws, to_port)
@@ -80,23 +133,23 @@ impl Engine {
     /// Like [`connect_mail`](Self::connect_mail), by ID: for wiring that
     /// comes from data. Kinds and types are checked here.
     pub fn connect_mail_ids(&mut self, from: InterfaceId, to: InterfaceId) -> Result<(), EngineError> {
+        self.collect_garbage();
         let (from_ws, from_port) = self.find_id(from)?;
         let (to_ws, to_port) = self.find_id(to)?;
-        let source = &self.workstreams[from_ws].1;
-        let target = &self.workstreams[to_ws].1;
-        if source.kind(from_port) != InterfaceKind::Outbox {
-            return Err(EngineError::NotAnOutbox(source.path_of(from_port).to_owned()));
+        let (source, target) = (self.layout(from_ws), self.layout(to_ws));
+        let (out, inb) = (source.port(from_port), target.port(to_port));
+        if out.kind != InterfaceKind::Outbox {
+            return Err(EngineError::NotAnOutbox(out.path.clone()));
         }
-        if target.kind(to_port) != InterfaceKind::Inbox {
-            return Err(EngineError::NotAnInbox(target.path_of(to_port).to_owned()));
+        if inb.kind != InterfaceKind::Inbox {
+            return Err(EngineError::NotAnInbox(inb.path.clone()));
         }
-        let ((from_id, from_type), (to_id, to_type)) = (source.type_of(from_port), target.type_of(to_port));
-        if from_id != to_id {
+        if out.type_id != inb.type_id {
             return Err(EngineError::TypeMismatch {
-                from: source.path_of(from_port).to_owned(),
-                from_type,
-                to: target.path_of(to_port).to_owned(),
-                to_type,
+                from: out.path.clone(),
+                from_type: out.type_name,
+                to: inb.path.clone(),
+                to_type: inb.type_name,
             });
         }
         self.connect_ports(from_ws, from_port, to_ws, to_port)
@@ -106,128 +159,163 @@ impl Engine {
     /// a MIDI callback thread.
     pub fn sender<M: Message>(&self, inbox: Inbox<M>) -> Result<MailSender<M>, EngineError> {
         let (ws, port) = self.locate(&inbox)?;
-        let mailbox = self.workstreams[ws].1.typed_mailbox::<M>(port).expect("typed handle, inbox");
-        Ok(MailSender { mailbox })
+        self.sender_port(ws, port)
     }
 
     /// Like [`sender`](Self::sender), by ID.
     pub fn sender_id<M: Message>(&self, inbox: InterfaceId) -> Result<MailSender<M>, EngineError> {
         let (ws, port) = self.find_id(inbox)?;
-        let workstream = &self.workstreams[ws].1;
-        if workstream.kind(port) != InterfaceKind::Inbox {
-            return Err(EngineError::NotAnInbox(workstream.path_of(port).to_owned()));
+        let info = self.layout(ws).port(port);
+        if info.kind != InterfaceKind::Inbox {
+            return Err(EngineError::NotAnInbox(info.path.clone()));
         }
-        let mailbox = workstream.typed_mailbox::<M>(port).ok_or_else(|| wrong_type(workstream, port))?;
-        Ok(MailSender { mailbox })
+        self.sender_port(ws, port)
     }
 
     /// Receive what an outbox sends, outside any block (a test, the host's
     /// loop). `delivery` sets this receiver's own queue.
     pub fn listen<M: Message>(&mut self, outbox: Outbox<M>, delivery: Delivery) -> Result<MailReceiver<M>, EngineError> {
+        self.collect_garbage();
         let (ws, port) = self.locate(&outbox)?;
         self.listen_port(ws, port, delivery)
     }
 
     /// Like [`listen`](Self::listen), by ID.
     pub fn listen_id<M: Message>(&mut self, outbox: InterfaceId, delivery: Delivery) -> Result<MailReceiver<M>, EngineError> {
+        self.collect_garbage();
         let (ws, port) = self.find_id(outbox)?;
-        let workstream = &self.workstreams[ws].1;
-        if workstream.kind(port) != InterfaceKind::Outbox {
-            return Err(EngineError::NotAnOutbox(workstream.path_of(port).to_owned()));
+        let info = self.layout(ws).port(port);
+        if info.kind != InterfaceKind::Outbox {
+            return Err(EngineError::NotAnOutbox(info.path.clone()));
         }
-        if workstream.type_of(port).0 != TypeId::of::<M>() {
-            return Err(wrong_type(workstream, port));
+        if info.type_id != TypeId::of::<M>() {
+            return Err(wrong_type(self.layout(ws), port));
         }
         self.listen_port(ws, port, delivery)
     }
 
     /// A workstream's root block, as its own type: where reaching handles
-    /// from outside starts.
+    /// from outside starts. Only while the engine still holds it (get
+    /// handles before [`take`](Self::take); they stay valid).
     pub fn root<R: Block>(&self, id: WorkstreamId) -> Result<&R, EngineError> {
-        let workstream = self.workstream(id).ok_or(EngineError::UnknownWorkstream(id))?;
-        workstream.root::<R>().ok_or(EngineError::Access(AccessError::ForeignHandle))
+        let runner = self.entry(id)?.runner.as_ref().ok_or(EngineError::Taken)?;
+        runner.root::<R>().ok_or(EngineError::Access(AccessError::ForeignHandle))
     }
 
-    /// A block anywhere in the engine, as its own type.
+    /// A block anywhere in the engine, as its own type (while the engine
+    /// holds its workstream).
     pub fn get<B: Block>(&self, child: Child<B>) -> Result<&B, EngineError> {
-        let workstream = self.workstreams.iter().find(|(_, w)| w.tree() == child.tree).ok_or(EngineError::ForeignHandle)?;
-        workstream.1.get(child).ok_or(EngineError::ForeignHandle)
+        let entry = self.entries.iter().find(|e| e.control.layout.tree == child.tree).ok_or(EngineError::ForeignHandle)?;
+        let runner = entry.runner.as_ref().ok_or(EngineError::Taken)?;
+        runner.get(child).ok_or(EngineError::ForeignHandle)
     }
 
+    /// The stepping side, while the engine holds it.
     pub fn workstream(&self, id: WorkstreamId) -> Option<&Workstream> {
-        self.workstreams.iter().find(|(_, w)| w.tree() == id.0).map(|(_, w)| w)
+        self.entry(id).ok()?.runner.as_ref()
     }
 
     pub fn workstream_mut(&mut self, id: WorkstreamId) -> Option<&mut Workstream> {
-        self.workstreams.iter_mut().find(|(_, w)| w.tree() == id.0).map(|(_, w)| w)
+        self.entry_mut(id).ok()?.runner.as_mut()
     }
 
-    /// Remove a workstream, typically to move it to the thread that steps
-    /// it. Its mailbox links stay intact (they're shared queues).
+    /// Take the stepping side out, to move it to the thread that steps it.
+    /// The engine keeps the control side: rebuilds, knob settings and new
+    /// links still reach it.
     pub fn take(&mut self, id: WorkstreamId) -> Option<Workstream> {
-        let index = self.workstreams.iter().position(|(_, w)| w.tree() == id.0)?;
-        Some(self.workstreams.remove(index).1)
+        self.entry_mut(id).ok()?.runner.take()
     }
 
-    /// Step every workstream once, in the order they were added. For hosts
-    /// that run everything on one thread (and for tests).
+    /// Step every workstream the engine still holds, in the order they were
+    /// added (for hosts that run everything on one thread, and tests), then
+    /// free what they swapped out.
     pub fn step_all(&mut self) {
-        for (_, workstream) in &mut self.workstreams {
-            workstream.step();
+        for entry in &mut self.entries {
+            if let Some(runner) = &mut entry.runner {
+                runner.step();
+            }
+        }
+        self.collect_garbage();
+    }
+
+    /// Free what workstreams have swapped out. Every method calls this;
+    /// call it regularly when the engine is otherwise idle (e.g. once per
+    /// UI frame).
+    pub fn collect_garbage(&mut self) {
+        for entry in &mut self.entries {
+            entry.control.collect_garbage();
         }
     }
 
     /// The workstreams, with their display labels.
     pub fn workstreams(&self) -> impl Iterator<Item = (WorkstreamId, &str)> {
-        self.workstreams.iter().map(|(label, w)| (WorkstreamId(w.tree()), label.as_str()))
+        self.entries.iter().map(|e| (WorkstreamId(e.control.layout.tree), e.label.as_str()))
     }
 
     // ---- helpers -------------------------------------------------------------------
 
-    /// A handle → (workstream index, port), checking it's exposed.
+    fn entry(&self, id: WorkstreamId) -> Result<&Entry, EngineError> {
+        self.entries.iter().find(|e| e.control.layout.tree == id.0).ok_or(EngineError::UnknownWorkstream(id))
+    }
+
+    fn entry_mut(&mut self, id: WorkstreamId) -> Result<&mut Entry, EngineError> {
+        self.entries.iter_mut().find(|e| e.control.layout.tree == id.0).ok_or(EngineError::UnknownWorkstream(id))
+    }
+
+    fn layout(&self, index: usize) -> &Layout {
+        &self.entries[index].control.layout
+    }
+
+    /// A handle → (entry index, port), checking it's exposed.
     fn locate(&self, handle: &impl PortHandle) -> Result<(usize, usize), EngineError> {
-        let ws = self.workstreams.iter().position(|(_, w)| w.tree() == handle.port_tree()).ok_or(EngineError::ForeignHandle)?;
-        Ok((ws, self.workstreams[ws].1.handle(handle)?))
+        let index = self
+            .entries
+            .iter()
+            .position(|e| e.control.layout.tree == handle.port_tree())
+            .ok_or(EngineError::ForeignHandle)?;
+        Ok((index, self.layout(index).handle(handle)?))
     }
 
     fn find_id(&self, id: InterfaceId) -> Result<(usize, usize), EngineError> {
-        self.workstreams
+        self.entries
             .iter()
             .enumerate()
-            .find_map(|(i, (_, w))| w.by_id(id).ok().map(|port| (i, port)))
+            .find_map(|(i, e)| e.control.layout.by_id(id).ok().map(|port| (i, port)))
             .ok_or(EngineError::UnknownInterface(id))
     }
 
     fn connect_ports(&mut self, from_ws: usize, from_port: usize, to_ws: usize, to_port: usize) -> Result<(), EngineError> {
         self.check_realtime(from_ws, from_port)?;
-        let mailbox = self.workstreams[to_ws].1.mailbox_of(to_port).expect("inboxes have mailboxes");
-        let added = self.workstreams[from_ws].1.add_target(from_port, mailbox);
-        debug_assert!(added, "types were checked");
+        let mailbox = self.layout(to_ws).port(to_port).mailbox.clone().expect("inboxes have mailboxes");
+        self.entries[from_ws].control.add_target(from_port, mailbox)?;
         Ok(())
+    }
+
+    fn sender_port<M: Message>(&self, ws: usize, port: usize) -> Result<MailSender<M>, EngineError> {
+        let layout = self.layout(ws);
+        let mailbox = layout.port(port).mailbox.clone().and_then(|m| m.downcast::<Mailbox<M>>().ok());
+        let mailbox = mailbox.ok_or_else(|| wrong_type(layout, port))?;
+        Ok(MailSender { mailbox })
     }
 
     fn listen_port<M: Message>(&mut self, ws: usize, port: usize, delivery: Delivery) -> Result<MailReceiver<M>, EngineError> {
         self.check_realtime(ws, port)?;
         let (receiver, mailbox) = receiver::<M>(delivery);
-        self.workstreams[ws].1.add_target(port, mailbox);
+        self.entries[ws].control.add_target(port, mailbox)?;
         Ok(receiver)
     }
 
     fn check_realtime(&self, ws: usize, port: usize) -> Result<(), EngineError> {
-        let workstream = &self.workstreams[ws].1;
-        if workstream.is_realtime() && workstream.drops(port) {
-            return Err(EngineError::NotRealtimeSafe {
-                path: workstream.path_of(port).to_owned(),
-                type_name: workstream.type_of(port).1,
-            });
+        let layout = self.layout(ws);
+        let info = layout.port(port);
+        if layout.realtime && info.mail.is_some_and(|f| f.drops) {
+            return Err(EngineError::NotRealtimeSafe { path: info.path.clone(), type_name: info.type_name });
         }
         Ok(())
     }
 }
 
-fn wrong_type(workstream: &Workstream, port: usize) -> EngineError {
-    EngineError::Access(AccessError::WrongType {
-        path: workstream.path_of(port).to_owned(),
-        actual: workstream.type_of(port).1,
-    })
+fn wrong_type(layout: &Layout, port: usize) -> EngineError {
+    let info = layout.port(port);
+    EngineError::Access(AccessError::WrongType { path: info.path.clone(), actual: info.type_name })
 }

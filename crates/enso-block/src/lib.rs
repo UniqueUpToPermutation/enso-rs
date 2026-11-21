@@ -53,7 +53,9 @@
 
 mod block;
 mod build;
+mod control;
 mod engine;
+mod graph;
 mod ids;
 mod mail;
 mod merge;
