@@ -6,7 +6,7 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{quote, quote_spanned};
 use syn::{
-    Data, DeriveInput, Expr, Field, Fields, Ident, LitStr, Type, parse_macro_input, spanned::Spanned,
+    Data, DeriveInput, Expr, Field, Fields, Ident, LitInt, LitStr, Type, parse_macro_input, spanned::Spanned,
 };
 
 #[proc_macro_derive(Ports, attributes(input, output, inbox, outbox, child, private))]
@@ -31,6 +31,8 @@ enum Kind {
 struct PortField {
     ident: Ident,
     name: String,
+    /// `id = N`: an explicit key.
+    id: Option<LitInt>,
     kind: Kind,
     private: bool,
     span: Span,
@@ -66,21 +68,29 @@ fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
     }
 
     let statements = ports.iter().map(|port| {
-        let PortField { ident, name, span, .. } = port;
+        let PortField { ident, name, span, id, .. } = port;
+        // Identity: the explicit id, or a hash of the *field* name (not the
+        // label), so relabelling never breaks saved data.
+        let field = ident.to_string();
+        let key = match id {
+            Some(id) => quote! { ::enso_block::Key::new(#id) },
+            None => quote! { ::enso_block::Key::named(#field) },
+        };
+        let spec = quote! { ::enso_block::Spec::new(#key, #name) };
         let register = match &port.kind {
             Kind::Input { default, merge: None } => {
                 let default = or_default(default);
-                quote_spanned! {*span=> self.#ident = r.input(#name, #default); }
+                quote_spanned! {*span=> self.#ident = r.input(#spec, #default); }
             }
             Kind::Input { default, merge: Some(mode) } => {
                 let default = or_default(default);
                 quote_spanned! {*span=>
-                    self.#ident = r.input_merged(#name, #default, ::enso_block::MergeMode::#mode);
+                    self.#ident = r.input_merged(#spec, #default, ::enso_block::MergeMode::#mode);
                 }
             }
             Kind::Output { initial } => {
                 let initial = or_default(initial);
-                quote_spanned! {*span=> self.#ident = r.output(#name, #initial); }
+                quote_spanned! {*span=> self.#ident = r.output(#spec, #initial); }
             }
             Kind::Inbox { capacity, latest } => {
                 let delivery = match (capacity, latest) {
@@ -88,12 +98,12 @@ fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
                     (Some(capacity), false) => quote! { ::enso_block::Delivery::Queue(#capacity) },
                     (None, false) => quote! { ::core::default::Default::default() },
                 };
-                quote_spanned! {*span=> self.#ident = r.inbox(#name, #delivery); }
+                quote_spanned! {*span=> self.#ident = r.inbox(#spec, #delivery); }
             }
-            Kind::Outbox => quote_spanned! {*span=> self.#ident = r.outbox(#name); },
+            Kind::Outbox => quote_spanned! {*span=> self.#ident = r.outbox(#spec); },
             Kind::Child { init } => {
                 let init = or_default(init);
-                quote_spanned! {*span=> self.#ident = r.child(#name, #init); }
+                quote_spanned! {*span=> self.#ident = r.child(#spec, #init); }
             }
         };
         let private = port.private.then(|| quote_spanned! {*span=> r.private(self.#ident); });
@@ -125,6 +135,7 @@ fn or_default(expr: &Option<Expr>) -> Tokens {
 fn parse_field(field: &Field) -> syn::Result<Option<PortField>> {
     let ident = field.ident.clone().expect("named fields");
     let mut name = ident.to_string();
+    let mut id = None;
     let mut kind = None;
     let mut private = false;
 
@@ -148,6 +159,7 @@ fn parse_field(field: &Field) -> syn::Result<Option<PortField>> {
                 let key = meta.path.get_ident().map(Ident::to_string).unwrap_or_default();
                 match (which, key.as_str()) {
                     (_, "name") => name = meta.value()?.parse::<LitStr>()?.value(),
+                    (_, "id") => id = Some(meta.value()?.parse::<LitInt>()?),
                     ("input", "default") | ("output", "initial") | ("child", "init") | ("inbox", "capacity") => {
                         value = Some(meta.value()?.parse::<Expr>()?);
                     }
@@ -161,11 +173,11 @@ fn parse_field(field: &Field) -> syn::Result<Option<PortField>> {
                     }
                     _ => {
                         let allowed = match which {
-                            "input" => "name, default, merge",
-                            "output" => "name, initial",
-                            "inbox" => "name, capacity, latest",
-                            "outbox" => "name",
-                            _ => "name, init",
+                            "input" => "name, id, default, merge",
+                            "output" => "name, id, initial",
+                            "inbox" => "name, id, capacity, latest",
+                            "outbox" => "name, id",
+                            _ => "name, id, init",
                         };
                         return Err(meta.error(format!("unknown argument for #[{which}]; expected {allowed}")));
                     }
@@ -203,7 +215,7 @@ fn parse_field(field: &Field) -> syn::Result<Option<PortField>> {
         Some(Kind::Child { .. }) if private => {
             Err(syn::Error::new(field.span(), "#[private] goes with ports and mailboxes, not children"))
         }
-        Some(kind) => Ok(Some(PortField { ident, name, kind, private, span: field.span() })),
+        Some(kind) => Ok(Some(PortField { ident, name, id, kind, private, span: field.span() })),
         None if private => Err(syn::Error::new(field.span(), "#[private] goes with a port or mailbox attribute")),
         None => Ok(None),
     }

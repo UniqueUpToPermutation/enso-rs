@@ -1,8 +1,9 @@
-//! Mailboxes and the engine (build-order step 2 of docs/design/blocks.md).
+//! Mailboxes and the engine (build-order step 2 of docs/design/blocks.md),
+//! reached by handle and by ID (decision 23).
 
 use enso_block::{
-    Block, BuildError, Child, Delivery, Engine, EngineError, Inbox, Io, LinkError, Linker, Outbox, Ports,
-    Workstream,
+    AccessError, Block, BuildError, Child, Delivery, Engine, EngineError, Inbox, InterfaceId, Io, Key, LinkError,
+    Linker, Outbox, Ports, Workstream,
 };
 
 // ---- small blocks -------------------------------------------------------------------
@@ -49,7 +50,7 @@ impl Block for Collector {
     }
 }
 
-/// An inbox with `Latest` delivery that records what it gets.
+/// An inbox with `Latest` delivery that republishes what it gets.
 #[derive(Ports, Default)]
 struct Gauge {
     #[inbox(latest)]
@@ -66,8 +67,7 @@ impl Block for Gauge {
     }
 }
 
-// ---- within one workstream ----------------------------------------------------------
-
+/// An emitter feeding a collector, in one tree.
 #[derive(Ports, Default)]
 struct Pair {
     #[child(init = Emitter { per_step: 1, ..Default::default() })]
@@ -82,11 +82,20 @@ impl Block for Pair {
     }
 }
 
+/// `root.collector`'s handles, from an engine.
+fn collector_of<R: Block>(engine: &Engine, root: &R, pick: impl Fn(&R) -> Child<Collector>) -> (Inbox<u32>, Outbox<u32>) {
+    let collector = engine.get(pick(root)).unwrap();
+    (collector.input, collector.count)
+}
+
+// ---- within one workstream ----------------------------------------------------------
+
 #[test]
 fn messages_arrive_at_the_next_step_and_dont_order_execution() {
     let mut engine = Engine::new();
-    engine.add("main", Workstream::build(Pair::default()).unwrap()).unwrap();
-    let counts = engine.listen::<u32>("main:collector/count", Delivery::Queue(16)).unwrap();
+    let main = engine.add("main", Workstream::build(Pair::default()).unwrap());
+    let (_, count) = collector_of(&engine, engine.root::<Pair>(main).unwrap(), |r| r.collector);
+    let counts = engine.listen(count, Delivery::Queue(16)).unwrap();
 
     engine.step_all();
     engine.step_all();
@@ -111,17 +120,17 @@ fn queues_drop_the_oldest_when_full() {
         }
     }
     let mut ws = Workstream::build(Flood::default()).unwrap();
+    let input = ws.get(ws.root::<Flood>().unwrap().collector).unwrap().input;
     ws.step(); // 12 messages into a queue of 8: the 4 oldest are pushed out
-    assert_eq!(ws.dropped("collector/in"), Ok(4));
+    assert_eq!(ws.dropped(input), Ok(4));
     // Next step the emitter runs first and sends 12 more before the
     // collector reads: all 8 waiting messages and 4 new ones are pushed out.
     ws.step();
-    assert_eq!(ws.dropped("collector/in"), Ok(16));
+    assert_eq!(ws.dropped(input), Ok(16));
 }
 
 #[test]
 fn unread_messages_wait_for_later_steps() {
-    let mut engine = Engine::new();
     #[derive(Ports, Default)]
     struct Slow {
         #[child(init = Emitter { per_step: 3, ..Default::default() })]
@@ -134,8 +143,10 @@ fn unread_messages_wait_for_later_steps() {
             l.connect_mail(l[self.emitter].out, l[self.collector].input)
         }
     }
-    engine.add("main", Workstream::build(Slow::default()).unwrap()).unwrap();
-    let counts = engine.listen::<u32>("main:collector/count", Delivery::Queue(16)).unwrap();
+    let mut engine = Engine::new();
+    let main = engine.add("main", Workstream::build(Slow::default()).unwrap());
+    let (_, count) = collector_of(&engine, engine.root::<Slow>(main).unwrap(), |r| r.collector);
+    let counts = engine.listen(count, Delivery::Queue(16)).unwrap();
     for _ in 0..4 {
         engine.step_all();
     }
@@ -146,9 +157,11 @@ fn unread_messages_wait_for_later_steps() {
 #[test]
 fn latest_keeps_only_the_newest() {
     let mut engine = Engine::new();
-    engine.add("gauge", Workstream::build(Gauge::default()).unwrap()).unwrap();
-    let level = engine.sender::<u32>("gauge:level").unwrap();
-    let seen = engine.listen::<u32>("gauge:seen", Delivery::Queue(16)).unwrap();
+    let gauge = engine.add("gauge", Workstream::build(Gauge::default()).unwrap());
+    let root = engine.root::<Gauge>(gauge).unwrap();
+    let (level_in, seen_out) = (root.level, root.seen);
+    let level = engine.sender(level_in).unwrap();
+    let seen = engine.listen(seen_out, Delivery::Queue(16)).unwrap();
 
     for value in [3, 7, 9] {
         level.send(value);
@@ -173,16 +186,21 @@ fn outboxes_fan_out_and_inboxes_fan_in() {
     }
     impl Block for Web {
         fn link(&mut self, l: &mut Linker) -> Result<(), LinkError> {
-            // a → left and right; b → left (by path).
+            // a → left and right; b → left (by ID, as data would).
             l.connect_mail(l[self.a].out, l[self.left].input)?;
             l.connect_mail(l[self.a].out, l[self.right].input)?;
-            l.connect_paths("b/out", "left/in")
+            let from = InterfaceId { block: l.id_of(self.b), key: Key::named("out") };
+            let to = InterfaceId { block: l.id_of(self.left), key: Key::named("input") };
+            l.connect_ids(from, to)
         }
     }
     let mut engine = Engine::new();
-    engine.add("main", Workstream::build(Web::default()).unwrap()).unwrap();
-    let left = engine.listen::<u32>("main:left/count", Delivery::Latest).unwrap();
-    let right = engine.listen::<u32>("main:right/count", Delivery::Latest).unwrap();
+    let main = engine.add("main", Workstream::build(Web::default()).unwrap());
+    let root = engine.root::<Web>(main).unwrap();
+    let (_, left_count) = collector_of(&engine, root, |r| r.left);
+    let (_, right_count) = collector_of(&engine, root, |r| r.right);
+    let left = engine.listen(left_count, Delivery::Latest).unwrap();
+    let right = engine.listen(right_count, Delivery::Latest).unwrap();
     engine.step_all();
     engine.step_all();
     assert_eq!((left.try_recv(), right.try_recv()), (Some(2), Some(1)));
@@ -209,21 +227,23 @@ fn a_parent_cant_wire_its_own_mailboxes() {
 #[test]
 fn ports_and_mailboxes_dont_mix() {
     #[derive(Ports, Default)]
+    struct Number {
+        #[input]
+        value: enso_block::In<u32>,
+    }
+    impl Block for Number {}
+    #[derive(Ports, Default)]
     struct Mixed {
         #[child]
         emitter: Child<Emitter>,
         #[child]
         number: Child<Number>,
     }
-    #[derive(Ports, Default)]
-    struct Number {
-        #[input]
-        value: enso_block::In<u32>,
-    }
-    impl Block for Number {}
     impl Block for Mixed {
         fn link(&mut self, l: &mut Linker) -> Result<(), LinkError> {
-            l.connect_paths("emitter/out", "number/value")
+            let from = InterfaceId { block: l.id_of(self.emitter), key: Key::named("out") };
+            let to = InterfaceId { block: l.id_of(self.number), key: Key::named("value") };
+            l.connect_ids(from, to)
         }
     }
     let err = Workstream::build(Mixed::default()).err().unwrap();
@@ -233,12 +253,18 @@ fn ports_and_mailboxes_dont_mix() {
 // ---- across workstreams -------------------------------------------------------------
 
 #[test]
-fn the_engine_links_workstreams_by_path() {
+fn the_engine_links_workstreams_by_handle() {
     let mut engine = Engine::new();
-    engine.add("source", Workstream::build(Emitter { per_step: 2, ..Default::default() }).unwrap()).unwrap();
-    engine.add("sink", Workstream::build(Collector::default()).unwrap()).unwrap();
-    engine.connect_mail("source:out", "sink:/in").unwrap(); // a leading '/' is fine
-    let counts = engine.listen::<u32>("sink:count", Delivery::Latest).unwrap();
+    let source = engine.add("source", Workstream::build(Emitter { per_step: 2, ..Default::default() }).unwrap());
+    let sink = engine.add("sink", Workstream::build(Collector::default()).unwrap());
+    let out = engine.root::<Emitter>(source).unwrap().out;
+    let (input, count) = {
+        let c = engine.root::<Collector>(sink).unwrap();
+        (c.input, c.count)
+    };
+    // The handles know their workstreams: nothing else to say.
+    engine.connect_mail(out, input).unwrap();
+    let counts = engine.listen(count, Delivery::Latest).unwrap();
 
     // `step_all` steps "source" then "sink": the sink's step begins after
     // the source has sent, so each round's 2 messages arrive that round.
@@ -248,34 +274,54 @@ fn the_engine_links_workstreams_by_path() {
 }
 
 #[test]
-fn engine_errors() {
+fn the_engine_links_workstreams_by_id() {
     let mut engine = Engine::new();
-    engine.add("a", Workstream::build(Emitter::default()).unwrap()).unwrap();
-    engine.add("b", Workstream::build(Collector::default()).unwrap()).unwrap();
-    assert_eq!(
-        engine.add("a", Workstream::build(Emitter::default()).unwrap()),
-        Err(EngineError::DuplicateWorkstream("a".into()))
-    );
-    assert_eq!(engine.connect_mail("nope:out", "b:in"), Err(EngineError::UnknownWorkstream("nope".into())));
-    assert_eq!(engine.connect_mail("a-out", "b:in"), Err(EngineError::BadPath("a-out".into())));
-    assert_eq!(engine.connect_mail("b:in", "a:out"), Err(EngineError::NotAnOutbox("b:in".into())));
-    assert_eq!(engine.connect_mail("a:out", "b:count"), Err(EngineError::NotAnInbox("b:count".into())));
-    assert!(matches!(engine.connect_mail("a:missing", "b:in"), Err(EngineError::Access { .. })));
-    assert!(matches!(engine.sender::<String>("b:in"), Err(EngineError::Access { .. })), "wrong message type");
+    let source = engine.add("source", Workstream::build(Emitter { per_step: 1, ..Default::default() }).unwrap());
+    let sink = engine.add("sink", Workstream::build(Collector::default()).unwrap());
+    let id = |ws, key| InterfaceId { block: engine.workstream(ws).unwrap().id(), key: Key::named(key) };
+    let (from, to, count) = (id(source, "out"), id(sink, "input"), id(sink, "count"));
+    engine.connect_mail_ids(from, to).unwrap();
+    let counts = engine.listen_id::<u32>(count, Delivery::Latest).unwrap();
+    engine.step_all();
+    assert_eq!(counts.try_recv(), Some(1));
+
+    // Kinds and types are checked when linking by ID.
+    assert!(matches!(engine.connect_mail_ids(to, from), Err(EngineError::NotAnOutbox(_))));
+    assert!(matches!(engine.listen_id::<String>(count, Delivery::Latest), Err(EngineError::Access(AccessError::WrongType { .. }))));
 }
 
 #[test]
-fn type_mismatch_between_workstreams() {
+fn engine_errors() {
+    let mut engine = Engine::new();
+    let a = engine.add("a", Workstream::build(Emitter::default()).unwrap());
+    let out = engine.root::<Emitter>(a).unwrap().out;
+
+    // A workstream that isn't in this engine.
+    let stray = Workstream::build(Collector::default()).unwrap();
+    let stray_in = stray.root::<Collector>().unwrap().input;
+    assert_eq!(engine.connect_mail(out, stray_in), Err(EngineError::ForeignHandle));
+    assert_eq!(engine.sender(stray_in).err(), Some(EngineError::ForeignHandle));
+    assert!(matches!(engine.root::<Collector>(a), Err(EngineError::Access(_))), "wrong root type");
+
+    let missing = InterfaceId { block: engine.workstream(a).unwrap().id(), key: Key::named("nope") };
+    assert_eq!(engine.sender_id::<u32>(missing).err(), Some(EngineError::UnknownInterface(missing)));
+}
+
+#[test]
+fn type_mismatch_between_workstreams_by_id() {
     #[derive(Ports, Default)]
     struct TextSink {
-        #[inbox(name = "in")]
-        input: Inbox<String>,
+        #[inbox]
+        text: Inbox<String>,
     }
     impl Block for TextSink {}
     let mut engine = Engine::new();
-    engine.add("a", Workstream::build(Emitter::default()).unwrap()).unwrap();
-    engine.add("b", Workstream::build(TextSink::default()).unwrap()).unwrap();
-    assert!(matches!(engine.connect_mail("a:out", "b:in"), Err(EngineError::TypeMismatch { .. })));
+    let a = engine.add("a", Workstream::build(Emitter::default()).unwrap());
+    let b = engine.add("b", Workstream::build(TextSink::default()).unwrap());
+    let from = InterfaceId { block: engine.workstream(a).unwrap().id(), key: Key::named("out") };
+    let to = InterfaceId { block: engine.workstream(b).unwrap().id(), key: Key::named("text") };
+    assert!(matches!(engine.connect_mail_ids(from, to), Err(EngineError::TypeMismatch { .. })));
+    // (By handle, the same mistake doesn't compile: Outbox<u32> vs Inbox<String>.)
 }
 
 #[test]
@@ -303,13 +349,18 @@ fn realtime_workstreams_send_only_messages_that_own_no_memory() {
 #[test]
 fn workstreams_on_their_own_threads() {
     let mut engine = Engine::new();
-    engine.add("producer", Workstream::build(Emitter { per_step: 1, ..Default::default() }).unwrap()).unwrap();
-    engine.add("consumer", Workstream::build(Collector::default()).unwrap()).unwrap();
-    engine.connect_mail("producer:out", "consumer:in").unwrap();
-    let counts = engine.listen::<u32>("consumer:count", Delivery::Latest).unwrap();
+    let producer = engine.add("producer", Workstream::build(Emitter { per_step: 1, ..Default::default() }).unwrap());
+    let consumer = engine.add("consumer", Workstream::build(Collector::default()).unwrap());
+    let out = engine.root::<Emitter>(producer).unwrap().out;
+    let (input, count) = {
+        let c = engine.root::<Collector>(consumer).unwrap();
+        (c.input, c.count)
+    };
+    engine.connect_mail(out, input).unwrap();
+    let counts = engine.listen(count, Delivery::Latest).unwrap();
 
-    let mut producer = engine.take("producer").unwrap();
-    let mut consumer = engine.take("consumer").unwrap();
+    let mut producer = engine.take(producer).unwrap();
+    let mut consumer = engine.take(consumer).unwrap();
     // Workstreams are `Send`: each moves to its own thread.
     let a = std::thread::spawn(move || {
         for _ in 0..50 {
@@ -329,6 +380,6 @@ fn workstreams_on_their_own_threads() {
     consumer.step(); // collect anything that arrived after its last step
     // Up to 8 may be lost if the consumer fell behind (drop-oldest), never more.
     let received = std::iter::from_fn(|| counts.try_recv()).last().unwrap();
-    let dropped = consumer.dropped("in").unwrap() as u32;
+    let dropped = consumer.dropped(input).unwrap() as u32;
     assert_eq!(received + dropped, 50, "every message is either received or counted as dropped");
 }

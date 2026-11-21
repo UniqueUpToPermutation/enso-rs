@@ -24,12 +24,12 @@ steps 1–2: blocks, ports, interfaces, linking, a single-threaded
 
 1. **Register:** `root.register`. `Registrar::child` registers the child
    immediately (recursively), then stores it in the flat block table.
-   Block IDs follow registration order, so a parent's ID is lower than
-   its children's.
+   Block *indices* (internal) follow registration order, so a parent comes
+   before its children. Block *identity* is the `BlockId` (see Identity).
 2. **Load:** in reverse ID order (children before parents).
 3. **Dictionaries:** in reverse ID order. A block's dictionary holds its
-   own ports, its children's dictionaries prefixed `child/`, minus ports
-   it marked `private`, plus its aliases. The root's dictionary is
+   own ports, its children's dictionaries (display paths prefixed with the
+   child's label), minus ports it marked `private`, plus its aliases. The root's dictionary is
    `Workstream::interfaces()`.
 4. **Link:** each block is taken out of the table, `link` runs with a
    `Linker` that can see its children (`&l[child]` downcasts through
@@ -97,7 +97,7 @@ even with no annotated fields, because `Ports` is a supertrait.
   Mailbox ends are stored as "ports" internally (same handles, names,
   visibility and `private`), with `MailFns` (type-specific function
   pointers) instead of values.
-- Linking: `Linker::connect_mail(outbox, inbox)` or `connect_paths`
+- Linking: `Linker::connect_mail(outbox, inbox)` or `connect_ids`
   (which accepts either kind of pair). The visibility rules are the same as
   for ports. Fan-in and fan-out are unlimited; a duplicate pair is ignored.
   Mail links **don't affect execution order**.
@@ -112,23 +112,49 @@ even with no annotated fields, because `Ports` is a supertrait.
   `!needs_drop` (not just connected ones: sending to an unconnected outbox
   also drops on the sending thread). The engine checks again when
   connecting.
-- `Engine` (`engine.rs`): named workstreams; `connect_mail("ws:path",
-  "ws:path")`; `sender::<M>(inbox)` → `MailSender` (`Clone`, for e.g. MIDI
-  threads); `listen::<M>(outbox, delivery)` → `MailReceiver` (for the host
-  and tests); `take(name)` moves a workstream out to its thread (it's
+- `Engine` (`engine.rs`): workstreams by `WorkstreamId` (labels are for
+  display). `connect_mail(outbox, inbox)` takes handles (they carry their
+  tree tag, so the engine finds the workstreams itself);
+  `connect_mail_ids` takes `InterfaceId`s. `sender(inbox)` → `MailSender`
+  (`Clone`, for e.g. MIDI threads); `listen(outbox, delivery)` →
+  `MailReceiver` (for the host and tests); `_id` variants of both.
+  `root::<R>(id)` / `get(child)` reach handles. `take(id)` moves a workstream out to its thread (it's
   `Send`); `step_all()` steps all of them in order on one thread.
   Connections are made before the workstreams start; changing them while
   running is step 3.
 
+## Identity (decisions 23–25)
+
+- `ids.rs`: `BlockId` (a UUID), `Key` (u64, unique per block across ports,
+  mailboxes and aliases), `InterfaceId { block, key }`, `Spec { key,
+  label }` (what every `Registrar` method takes; `"name".into()` gives
+  `Key::named("name")` plus that label), `WorkstreamId`.
+- Root ID: `BuildOptions::id`, or random. Child ID: `parent.child(key)` =
+  UUID v5 of the key in the parent's namespace, so it's deterministic.
+  `Registrar::child_with_id` is for children created from data (IDs from a
+  file). Duplicate child IDs are a registration error.
+- `Key::named` is FNV-1a and `const`. The derive keys by the **field** name
+  (not the label) or by `id = N`.
+- Handles carry `tree` (a global counter per build). The `Linker` refuses
+  foreign handles (`LinkError::ForeignHandle`), and so does `Workstream`
+  (`AccessError::ForeignHandle`). From outside, a port must be **exposed by
+  the root** (`AccessError::NotExposed`).
+- Outside access: `ws.root::<R>()` and `ws.get(child)` reach handles;
+  `ws.read(port)`, `ws.set(input, v)` and `ws.dropped(inbox)` take
+  handles; `read_id`/`set_id` take `InterfaceId`s. `Linker::id()` and
+  `id_of(child)` build IDs for `connect_ids`.
+- Labels are free text, may repeat, and are never looked up. They only
+  build display paths (`Workstream::disabled`, error messages,
+  `Interface::path`).
+
 ## API notes
 
 - `Registrar::get(child)` reads a child's handles during `register`, to
-  pass them to `private`/`alias`.
-- `Linker::connect` (typed: checked by the compiler) and
-  `Linker::connect_paths` (by path: checked by `TypeId` at link time, for
-  data-defined composites). `Linker::available()` lists what can be linked.
-- Names are path segments: non-empty, no `/`, unique within a block
-  across ports, children and aliases.
+  pass them to `private`/`alias`. In `link`, `&l[block]` reaches any block
+  of the tree (e.g. a grandchild through a child's `Child` field).
+- `Linker::connect` / `connect_mail` are typed (checked by the compiler);
+  `connect_ids` checks kind and `TypeId` at link time.
+  `Linker::available()` lists what can be linked.
 
-Tests: `tests/blocks.rs`, one per design rule, using small arithmetic
-blocks.
+Tests: `tests/blocks.rs` (one per design rule, small arithmetic blocks)
+and `tests/mail.rs` (mailboxes, engine, threads), all by handle or ID.

@@ -53,6 +53,8 @@ rtrb = "0.3"
 # Bounded lock-free multi-producer queue: MIDI from any number of input
 # threads into the audio thread.
 crossbeam-queue = "0.3"
+# Block identity: random v4 for roots, deterministic v5 for children.
+uuid = { version = "1", features = ["v4", "v5"] }
 # Audio devices on every desktop OS (WASAPI, CoreAudio, ALSA/PipeWire).
 cpal = "0.18"
 # Tests only: abort if the audio path allocates.

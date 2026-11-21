@@ -8,7 +8,8 @@ use std::{
 };
 
 use crate::{
-    Block, BuildError, In, Inbox, Interface, InterfaceKind, MergeMode, Message, Out, Outbox,
+    Block, BlockId, BuildError, Child, In, Inbox, Interface, InterfaceId, InterfaceKind, MergeMode, Message, Out,
+    Outbox, PortHandle,
     build::Build,
     mail::{AnyMailbox, MailFns, Mailbox},
     merge::{ClearFn, MergeFn},
@@ -61,17 +62,34 @@ pub struct Workstream {
     budget: Vec<Cell<usize>>,
     inboxes: Vec<u32>,
 
+    /// For display: each port's labels from the root.
+    port_path: Vec<String>,
+    /// Which ports the root exposes (others can't be reached from outside).
+    exposed: Vec<bool>,
     interfaces: Vec<Interface>,
+    tree: u32,
+    id: BlockId,
     realtime: bool,
     steps: u64,
     disabled: Vec<u32>,
 }
 
+/// How to build a [`Workstream`]; see [`Workstream::build_with`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuildOptions {
+    /// The root block's ID. Every other block's ID derives from it, so give
+    /// the same ID on every run to keep saved references valid. Default:
+    /// random.
+    pub id: Option<BlockId>,
+    /// Stepped on a real-time thread (see [`Workstream::build_realtime`]).
+    pub realtime: bool,
+}
+
 impl Workstream {
     /// Register, load and link `root` and its children, then compile them
-    /// into a runnable graph.
+    /// into a runnable graph. The root gets a random [`BlockId`].
     pub fn build(root: impl Block) -> Result<Self, BuildError> {
-        Self::compile(Build::new(Box::new(root))?, false)
+        Self::build_with(root, BuildOptions::default())
     }
 
     /// Like [`build`](Self::build), for a workstream stepped on a real-time
@@ -80,7 +98,12 @@ impl Workstream {
     /// never frees memory on that thread. Checked here and whenever the
     /// engine connects one of its outboxes.
     pub fn build_realtime(root: impl Block) -> Result<Self, BuildError> {
-        Self::compile(Build::new(Box::new(root))?, true)
+        Self::build_with(root, BuildOptions { realtime: true, ..Default::default() })
+    }
+
+    pub fn build_with(root: impl Block, options: BuildOptions) -> Result<Self, BuildError> {
+        let id = options.id.unwrap_or_else(BlockId::random);
+        Self::compile(Build::new(Box::new(root), id)?, options.realtime)
     }
 
     fn compile(mut build: Build, realtime: bool) -> Result<Self, BuildError> {
@@ -161,7 +184,15 @@ impl Workstream {
 
         let order = execution_order(&build)?;
         let interfaces = std::mem::take(&mut build.blocks[0].dictionary);
+        let mut exposed = vec![false; port_count];
+        for interface in &interfaces {
+            exposed[interface.port as usize] = true;
+        }
         Ok(Self {
+            port_path: (0..port_count as u32).map(|p| build.port_path(p)).collect(),
+            exposed,
+            tree: build.tree,
+            id: build.blocks[0].id,
             paths: build.blocks.iter().map(|b| b.path.clone()).collect(),
             blocks: build.blocks.into_iter().map(|b| b.block).collect(),
             order,
@@ -234,65 +265,129 @@ impl Workstream {
         self.realtime
     }
 
-    /// The root block's dictionary: everything it exposes, by path.
+    /// The root block's identity.
+    pub fn id(&self) -> BlockId {
+        self.id
+    }
+
+    /// The root block's dictionary: everything it exposes, with IDs.
     pub fn interfaces(&self) -> &[Interface] {
         &self.interfaces
     }
 
-    /// The current value of the port at `path` (an output, or what an
-    /// input sees).
-    pub fn read<T: 'static>(&self, path: &str) -> Result<Ref<'_, T>, AccessError> {
-        let port = self.typed_port::<T>(path)?;
-        if self.port_kind[port].is_mailbox() {
-            return Err(AccessError::NotAPort(path.to_owned()));
-        }
-        let slot = &self.slots[self.port_slot[port] as usize];
-        Ok(Ref::map(slot.borrow(), |v| (**v).downcast_ref::<T>().expect("type checked")))
+    /// The root block, as its own type: the starting point for reaching
+    /// handles from outside (`ws.get(ws.root::<Patch>()?.voice)`).
+    pub fn root<R: Block>(&self) -> Option<&R> {
+        self.blocks.first()?.as_deref().and_then(|b| (b as &dyn Any).downcast_ref::<R>())
     }
 
-    /// Turn a knob: set the value of an unconnected input. Call between
-    /// steps.
-    pub fn set<T: Send + 'static>(&mut self, path: &str, value: T) -> Result<(), AccessError> {
-        let port = self.typed_port::<T>(path)?;
+    /// A block of this tree, as its own type, to read its handles. `None`
+    /// for a handle of another tree or a block that was switched off.
+    pub fn get<B: Block>(&self, child: Child<B>) -> Option<&B> {
+        if child.tree != self.tree {
+            return None;
+        }
+        self.blocks.get(child.index as usize)?.as_deref().and_then(|b| (b as &dyn Any).downcast_ref::<B>())
+    }
+
+    /// The current value of a port (an output, or what an input sees). It
+    /// must be exposed by the root.
+    pub fn read<T: 'static>(&self, port: impl ValuePort<T>) -> Result<Ref<'_, T>, AccessError> {
+        let port = self.handle(&port)?;
+        Ok(self.value(port))
+    }
+
+    /// Like [`read`](Self::read), by ID (for tools working from data).
+    pub fn read_id<T: 'static>(&self, id: InterfaceId) -> Result<Ref<'_, T>, AccessError> {
+        let port = self.by_id(id)?;
+        if self.port_kind[port].is_mailbox() {
+            return Err(AccessError::NotAPort(self.port_path[port].clone()));
+        }
+        self.check_type::<T>(port)?;
+        Ok(self.value(port))
+    }
+
+    /// Turn a knob: set the value of an unconnected input (exposed by the
+    /// root). Call between steps.
+    pub fn set<T: Send + 'static>(&mut self, input: In<T>, value: T) -> Result<(), AccessError> {
+        let port = self.handle(&input)?;
+        self.set_port(port, value)
+    }
+
+    /// Like [`set`](Self::set), by ID.
+    pub fn set_id<T: Send + 'static>(&mut self, id: InterfaceId, value: T) -> Result<(), AccessError> {
+        let port = self.by_id(id)?;
+        self.check_type::<T>(port)?;
+        self.set_port(port, value)
+    }
+
+    /// Messages an inbox (exposed by the root) lost to a full queue.
+    pub fn dropped<M>(&self, inbox: Inbox<M>) -> Result<u64, AccessError> {
+        let port = self.handle(&inbox)?;
+        match (&self.mail_fns[port], &self.mailbox[port]) {
+            (Some(fns), Some(mailbox)) => Ok((fns.dropped)(&**mailbox)),
+            _ => Err(AccessError::NotAnInbox(self.port_path[port].clone())),
+        }
+    }
+
+    /// Display paths of blocks switched off because they panicked.
+    pub fn disabled(&self) -> impl Iterator<Item = &str> {
+        self.disabled.iter().map(|&b| self.paths[b as usize].as_str())
+    }
+
+    fn value<T: 'static>(&self, port: usize) -> Ref<'_, T> {
+        let slot = &self.slots[self.port_slot[port] as usize];
+        Ref::map(slot.borrow(), |v| (**v).downcast_ref::<T>().expect("type checked"))
+    }
+
+    fn set_port<T: Send + 'static>(&mut self, port: usize, value: T) -> Result<(), AccessError> {
         if !self.knob[port] {
-            return Err(AccessError::NotAKnob(path.to_owned()));
+            return Err(AccessError::NotAKnob(self.port_path[port].clone()));
         }
         *self.slots[self.port_slot[port] as usize].borrow_mut() = Box::new(value);
         Ok(())
     }
 
-    /// Messages the inbox at `path` lost to a full queue.
-    pub fn dropped(&self, path: &str) -> Result<u64, AccessError> {
-        let port = self.find(path)?;
-        match (&self.mail_fns[port], &self.mailbox[port]) {
-            (Some(fns), Some(mailbox)) => Ok((fns.dropped)(&**mailbox)),
-            _ => Err(AccessError::NotAnInbox(path.to_owned())),
+    fn check_type<T: 'static>(&self, port: usize) -> Result<(), AccessError> {
+        let (type_id, type_name) = self.port_type[port];
+        if type_id != TypeId::of::<T>() {
+            return Err(AccessError::WrongType { path: self.port_path[port].clone(), actual: type_name });
         }
-    }
-
-    /// Paths of blocks switched off because they panicked.
-    pub fn disabled(&self) -> impl Iterator<Item = &str> {
-        self.disabled.iter().map(|&b| self.paths[b as usize].as_str())
+        Ok(())
     }
 
     // ---- for the engine ------------------------------------------------------------
 
-    pub(crate) fn find(&self, path: &str) -> Result<usize, AccessError> {
-        let path = path.strip_prefix('/').unwrap_or(path);
-        self.interfaces
-            .iter()
-            .find(|i| i.path == path)
-            .map(|i| i.port as usize)
-            .ok_or_else(|| AccessError::Unknown(path.to_owned()))
+    pub(crate) fn tree(&self) -> u32 {
+        self.tree
     }
 
-    fn typed_port<T: 'static>(&self, path: &str) -> Result<usize, AccessError> {
-        let port = self.find(path)?;
-        let (type_id, type_name) = self.port_type[port];
-        if type_id != TypeId::of::<T>() {
-            return Err(AccessError::WrongType { path: path.to_owned(), actual: type_name });
+    /// A handle's port, if it's from this tree and exposed by the root.
+    /// (Typed handles need no type check: the compiler did it.)
+    pub(crate) fn handle(&self, handle: &impl PortHandle) -> Result<usize, AccessError> {
+        if handle.port_tree() == u32::MAX {
+            return Err(AccessError::Unregistered);
+        }
+        if handle.port_tree() != self.tree {
+            return Err(AccessError::ForeignHandle);
+        }
+        let port = handle.port_index() as usize;
+        if !self.exposed.get(port).copied().unwrap_or(false) {
+            return Err(AccessError::NotExposed(self.port_path.get(port).cloned().unwrap_or_default()));
         }
         Ok(port)
+    }
+
+    pub(crate) fn by_id(&self, id: InterfaceId) -> Result<usize, AccessError> {
+        self.interfaces
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.port as usize)
+            .ok_or(AccessError::UnknownInterface(id))
+    }
+
+    pub(crate) fn path_of(&self, port: usize) -> &str {
+        &self.port_path[port]
     }
 
     pub(crate) fn kind(&self, port: usize) -> InterfaceKind {
@@ -356,10 +451,22 @@ fn execution_order(build: &Build) -> Result<Vec<u32>, BuildError> {
     Ok(order)
 }
 
+/// Handles whose value can be read from outside: [`In`] and [`Out`].
+pub trait ValuePort<T>: PortHandle {}
+impl<T> ValuePort<T> for In<T> {}
+impl<T> ValuePort<T> for Out<T> {}
+
+/// Reaching a workstream from outside failed. Paths are display labels.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum AccessError {
-    #[error("no interface {0:?} on the root block")]
-    Unknown(String),
+    #[error("the root block exposes no interface {0:?}")]
+    UnknownInterface(InterfaceId),
+    #[error("a handle wasn't registered")]
+    Unregistered,
+    #[error("the handle belongs to a different workstream")]
+    ForeignHandle,
+    #[error("{0:?} isn't exposed by the root block (private somewhere on the way up?)")]
+    NotExposed(String),
     #[error("{path:?} carries {actual}")]
     WrongType { path: String, actual: &'static str },
     #[error("{0:?} isn't an unconnected input")]

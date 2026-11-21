@@ -65,6 +65,34 @@ composites. An execution engine runs the computation.
     sending to an unconnected outbox also drops the message on the sender's
     thread. `RealtimeMessage` still exists, implemented for `Copy` messages,
     for typed APIs.
+23. **Things are identified by IDs, never by names.** Names stay, as
+    optional, non-unique **labels** for display and error messages.
+24. **Port keys** identify an interface within its block. By default they're
+    derived from the field name; `id = N` pins one so the field can be
+    renamed without breaking saved data.
+25. **Block instances are identified by full UUIDs.**
+
+## 0. Identity
+
+| Thing | Identified in code by | Identified in data (files, editor) by |
+|---|---|---|
+| Block instance | `Child<B>` handle | `BlockId` (a UUID) |
+| Interface (port, mailbox end) | `In<T>`/`Out<T>`/`Inbox<M>`/`Outbox<M>` handle | `InterfaceId = (BlockId, Key)` |
+| Workstream | `WorkstreamId` (from `Engine::add`) | (future: an ID in the show file) |
+
+- **Handles** are small typed indices tagged with the tree they belong to,
+  so using a handle from another workstream is detected. The compiler checks
+  their types: `Outbox<f32>` can't be connected to `Inbox<String>`.
+- **Keys** (`Key`, 64-bit) are unique within a block: by default a stable
+  hash of the field name, or `#[input(id = 7)]`.
+- **`BlockId`s are deterministic for blocks built from code:** a child's
+  UUID is derived (UUID v5) from its parent's UUID and its key, so the same
+  tree gets the same IDs on every run and saved references stay valid.
+  Children created from data carry the UUIDs stored with them. A root's
+  UUID is given when building (`Workstream::build_with_id`), or random.
+- **Labels** (`name = "cutoff"`, default: the field name) appear in error
+  messages and the UI as paths like `voice/filter/cutoff`. They're never
+  looked up and needn't be unique.
 
 The audio engine (`enso-audio`) will be retrofitted first.
 
@@ -86,7 +114,7 @@ questions for the owner.
 | **Port** | `In<T>` / `Out<T>`: synchronous data flow within one workstream and one step. Defines execution order. |
 | **Mailbox** | `Inbox<M>` / `Outbox<M>`: asynchronous messages, across steps and workstreams. |
 | **Interface** | A named, public item in a block's dictionary: a port or a mailbox. |
-| **Path** | An interface's address: `audio:/instrument/voice/filter/cutoff` (workstream, then the path from its root). |
+| **Path** | A display string built from labels (`voice/filter/cutoff`) for errors and the UI. Never used for identity (§0). |
 
 ## 2. Two kinds of connection
 
@@ -111,18 +139,19 @@ which is which.
 
 ```rust
 let mut engine = Engine::new();
-engine.add_workstream("audio", audio_root)?;    // registers, loads, links, compiles
-engine.add_workstream("sim", sim_root)?;
-engine.add_workstream("render", render_root)?;
-engine.add_workstream("ui", ui_root)?;
-engine.connect_mail("audio:/instrument/level", "render:/visuals/level")?;
-engine.connect_mail("ui:/panel/preset", "audio:/instrument/load_preset")?;
+let audio = engine.add("audio", Workstream::build_realtime(AudioRoot::default())?)?;
+let render = engine.add("render", Workstream::build(RenderRoot::default())?)?;
+
+// Handles reach into a built tree like the Linker does (§0):
+let meter = engine.get(engine.root::<AudioRoot>(audio)?.meter)?;
+let visuals = engine.get(engine.root::<RenderRoot>(render)?.visuals)?;
+engine.connect_mail(meter.level, visuals.level)?;   // typed: checked by the compiler
 ```
 
 - **Cross-workstream wiring is the engine's job.** Workstream roots have no
-  common parent, so the engine links mailboxes between them by path,
-  checking type and policy against both interface dictionaries. The whole
-  description (workstreams, roots, links) is data, so a show can be one file.
+  common parent, so the engine links their mailboxes: by handle in code,
+  or by `InterfaceId` for wiring that comes from data. Both ends must be
+  exposed by their roots. A show can therefore be one file of IDs.
 - **Each workstream runs its tree, step by step.** Single-threaded at
   first. Each step: drain inboxes → run core routines in port order →
   publish outboxes. Later, inside the workstream only: a thread pool runs
@@ -193,7 +222,7 @@ Outbox), type, policy, merge, default, range, docs }`.
   routine still never connects that routine to its children. If it needs
   to take part, that functionality becomes a child.
 - Commands are inboxes; telemetry is outboxes with the `Latest` policy. The
-  UI can reach any block in any workstream by path.
+  UI can reach any block in any workstream by `InterfaceId`.
 
 ```rust
 struct Voice {
@@ -353,7 +382,7 @@ fn process(&mut self, io: &mut Io) {
 | `SharedParam` knobs | Unconnected `In<f32>`, set through a mailbox |
 | `Stats` atomics | Telemetry outboxes (`Latest`) |
 | `Patch` / `patch.output(..)` | A data-defined composite linking siblings; output is a sink block |
-| `PatchEditor` | Editor for data-defined composites, showing interfaces by path |
+| `PatchEditor` | Editor for data-defined composites, showing interfaces (by `InterfaceId`, labelled with their paths) |
 | (future) VST3 plugin | A leaf whose ports come from the plugin at register (decision 9); loaded in load |
 
 Proposal: a new `enso-block` crate (block traits, registrar, linker,
@@ -384,7 +413,7 @@ No blocking questions remain for a first implementation. Deferred:
    runs after the derived part.
 2. ✅ **Mailboxes and the engine:** `Inbox`/`Outbox`, Queue (drop-oldest) and
    Latest policies, `RealtimeMessage`, `Engine` with several workstreams and
-   path-based `connect_mail`.
+   `connect_mail` (by handle; by `InterfaceId` after decision 23).
 3. **Swap while running:** relink → compile → swap between steps, keeping
    block state. That's the existing `enso-audio` command/garbage mechanism,
    generalised.

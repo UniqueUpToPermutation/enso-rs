@@ -1,5 +1,8 @@
 //! Building a block tree: registration, loading, interface dictionaries,
 //! linking. Everything here runs before the workstream starts stepping.
+//!
+//! Identity is by IDs (design §0): every block has a [`BlockId`], every
+//! interface a [`Key`] within its block. Labels only build display paths.
 
 use std::{
     any::{Any, TypeId},
@@ -7,7 +10,9 @@ use std::{
 };
 
 use crate::{
-    Block, BlockError, Child, Delivery, In, Inbox, Merge, MergeMode, Message, Out, Outbox, PortHandle,
+    Block, BlockError, BlockId, Child, Delivery, In, Inbox, InterfaceId, Key, Merge, MergeMode, Message, Out,
+    Outbox, PortHandle, Spec,
+    ids::next_tree,
     mail::{MailFns, mail_fns},
     merge::{ClearFn, MergeFn, clear_erased, merge_erased},
 };
@@ -31,7 +36,9 @@ impl InterfaceKind {
 /// One entry of a block's public dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interface {
-    /// Relative to the block whose dictionary this is: `filter/cutoff`.
+    /// What identifies it, in data and across runs.
+    pub id: InterfaceId,
+    /// For display only: labels from this block down, e.g. `filter/cutoff`.
     pub path: String,
     pub kind: InterfaceKind,
     /// The Rust type carried, for display (`f32`, `enso_block::Events<..>`).
@@ -43,10 +50,10 @@ pub struct Interface {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum LinkError {
-    #[error("{0:?} isn't exposed by any child (it may be private, or the parent's own port)")]
+    #[error("{0:?} isn't exposed by any child (it may be private, or the parent's own interface)")]
     NotVisible(String),
-    #[error("{0:?} isn't an interface of any child")]
-    UnknownPath(String),
+    #[error("no child exposes {0:?}")]
+    UnknownInterface(InterfaceId),
     #[error("{from:?} carries {from_type}, but {to:?} expects {to_type}")]
     TypeMismatch { from: String, from_type: &'static str, to: String, to_type: &'static str },
     #[error("{0:?} → {1:?}: connect an output to an input, or an outbox to an inbox")]
@@ -55,8 +62,11 @@ pub enum LinkError {
     AlreadyLinked(String),
     #[error("a handle wasn't registered (missing assignment in `register`?)")]
     Unregistered,
+    #[error("a handle belongs to a different block tree")]
+    ForeignHandle,
 }
 
+/// Build failures. Paths in messages are display labels.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error("{path:?}: {message}")]
@@ -78,22 +88,25 @@ pub enum BuildError {
 
 pub(crate) struct BlockEntry {
     pub block: Option<Box<dyn Block>>,
-    pub name: String,
-    /// From the root: "" for the root, "voice/osc" below it.
+    pub id: BlockId,
+    pub label: String,
+    /// Labels from the root, for display: "" for the root, "voice/osc" below.
     pub path: String,
     pub children: Vec<u32>,
     pub ports: Vec<u32>,
     /// Ports (own or descendants') this block keeps from floating up.
     pub hidden: Vec<u32>,
-    pub aliases: Vec<(String, u32)>,
+    /// (key, label, port)
+    pub aliases: Vec<(Key, String, u32)>,
     pub dictionary: Vec<Interface>,
 }
 
 /// A registered interface: a port or a mailbox end. (Called a "port"
-/// internally either way: they share handles, names and visibility.)
+/// internally either way: they share handles, keys and visibility.)
 pub(crate) struct PortEntry {
     pub owner: u32,
-    pub name: String,
+    pub key: Key,
+    pub label: String,
     pub kind: InterfaceKind,
     pub type_id: TypeId,
     pub type_name: &'static str,
@@ -109,8 +122,9 @@ pub(crate) struct PortEntry {
     pub delivery: Delivery,
 }
 
-#[derive(Default)]
 pub(crate) struct Build {
+    /// Tags this tree's handles.
+    pub tree: u32,
     pub blocks: Vec<BlockEntry>,
     pub ports: Vec<PortEntry>,
     /// (output port, input port)
@@ -121,10 +135,18 @@ pub(crate) struct Build {
 }
 
 impl Build {
-    /// Run every stage up to linking.
-    pub fn new(root: Box<dyn Block>) -> Result<Self, BuildError> {
-        let mut build = Build::default();
-        build.blocks.push(BlockEntry::new(String::new(), String::new()));
+    /// Run every stage up to linking. `root_id` identifies the root block;
+    /// every other ID derives from it.
+    pub fn new(root: Box<dyn Block>, root_id: BlockId) -> Result<Self, BuildError> {
+        let mut build = Build {
+            tree: next_tree(),
+            blocks: Vec::new(),
+            ports: Vec::new(),
+            links: Vec::new(),
+            mail_links: Vec::new(),
+            errors: Vec::new(),
+        };
+        build.blocks.push(BlockEntry::new(root_id, String::new(), String::new()));
         let mut root = root;
         let mut r = Registrar { build: &mut build, block: 0 };
         root.register_ports(&mut r);
@@ -134,10 +156,11 @@ impl Build {
 
         // Load: children before parents (they're registered after them).
         for id in (0..build.blocks.len()).rev() {
-            let path = build.blocks[id].path.clone();
-            let block = build.blocks[id].block.as_mut().expect("present outside link");
+            let entry = &mut build.blocks[id];
+            let (path, block_id) = (entry.path.clone(), entry.id);
+            let block = entry.block.as_mut().expect("present outside link");
             block
-                .load(&mut LoadContext { path: &path })
+                .load(&mut LoadContext { path: &path, id: block_id })
                 .map_err(|source| BuildError::Load { path, source })?;
         }
 
@@ -162,10 +185,10 @@ impl Build {
         if self.errors.is_empty() { Ok(()) } else { Err(self.errors.remove(0)) }
     }
 
+    /// For display: the port's labels from the root.
     pub fn port_path(&self, port: u32) -> String {
         let p = &self.ports[port as usize];
-        let owner = &self.blocks[p.owner as usize].path;
-        if owner.is_empty() { p.name.clone() } else { format!("{owner}/{}", p.name) }
+        join(&self.blocks[p.owner as usize].path, &p.label)
     }
 
     fn make_dictionary(&mut self, id: u32) {
@@ -173,23 +196,22 @@ impl Build {
         let hidden = |port: u32| entry.hidden.contains(&port);
         let mut dictionary: Vec<Interface> = Vec::new();
         for &port in entry.ports.iter().filter(|&&p| !hidden(p)) {
-            // A block's own port appears in its dictionary under its name.
-            dictionary.push(self.interface(self.ports[port as usize].name.clone(), port));
+            let p = &self.ports[port as usize];
+            dictionary.push(self.interface(InterfaceId { block: entry.id, key: p.key }, p.label.clone(), port));
         }
         for &child in &entry.children {
             let child = &self.blocks[child as usize];
             for interface in child.dictionary.iter().filter(|i| !hidden(i.port)) {
-                dictionary.push(Interface { path: format!("{}/{}", child.name, interface.path), ..interface.clone() });
+                dictionary.push(Interface { path: join(&child.label, &interface.path), ..interface.clone() });
             }
         }
         let mut errors = Vec::new();
-        for (alias, port) in &entry.aliases {
-            if dictionary.iter().any(|i| &i.path == alias) {
-                errors.push(format!("alias {alias:?} clashes with an existing interface"));
-            } else if dictionary.iter().any(|i| i.port == *port) {
-                dictionary.push(Interface { path: alias.clone(), ..self.interface(String::new(), *port) });
+        for (key, label, port) in &entry.aliases {
+            if dictionary.iter().any(|i| i.port == *port) {
+                let id = InterfaceId { block: entry.id, key: *key };
+                dictionary.push(self.interface(id, label.clone(), *port));
             } else {
-                errors.push(format!("alias {alias:?} points at an interface this block doesn't expose"));
+                errors.push(format!("alias {label:?} points at an interface this block doesn't expose"));
             }
         }
         let path = entry.path.clone();
@@ -197,17 +219,23 @@ impl Build {
         self.blocks[id as usize].dictionary = dictionary;
     }
 
-    fn interface(&self, path: String, port: u32) -> Interface {
+    fn interface(&self, id: InterfaceId, path: String, port: u32) -> Interface {
         let p = &self.ports[port as usize];
-        Interface { path, kind: p.kind, type_name: p.type_name, merge: p.merge, port, type_id: p.type_id }
+        Interface { id, path, kind: p.kind, type_name: p.type_name, merge: p.merge, port, type_id: p.type_id }
     }
 }
 
+/// `a/b`, or just `b` when `a` is empty (the root).
+fn join(a: &str, b: &str) -> String {
+    if a.is_empty() { b.to_owned() } else { format!("{a}/{b}") }
+}
+
 impl BlockEntry {
-    fn new(name: String, path: String) -> Self {
+    fn new(id: BlockId, label: String, path: String) -> Self {
         Self {
             block: None,
-            name,
+            id,
+            label,
             path,
             children: Vec::new(),
             ports: Vec::new(),
@@ -220,31 +248,39 @@ impl BlockEntry {
 
 // ---- registration ------------------------------------------------------------------
 
-/// Handed to [`Block::register`]: declares the block's ports and children.
+/// Handed to [`Block::register`]: declares the block's interfaces and
+/// children. Each takes a [`Spec`] (key + label); `"name".into()` keys by
+/// the name's hash and labels with the name.
 pub struct Registrar<'a> {
     build: &'a mut Build,
     block: u32,
 }
 
 impl Registrar<'_> {
-    /// This block's path from the root (`""` for the root).
+    /// This block's identity.
+    pub fn id(&self) -> BlockId {
+        self.build.blocks[self.block as usize].id
+    }
+
+    /// For display: this block's labels from the root (`""` for the root).
     pub fn path(&self) -> &str {
         &self.build.blocks[self.block as usize].path
     }
 
     /// An input that accepts one link. `default` is its value while
     /// unconnected: an unconnected input is a knob.
-    pub fn input<T: Send + 'static>(&mut self, name: &str, default: T) -> In<T> {
+    pub fn input<T: Send + 'static>(&mut self, spec: impl Into<Spec>, default: T) -> In<T> {
         let entry = PortEntry { value: Some(Box::new(default)), ..PortEntry::new::<T>(InterfaceKind::In) };
-        In::new(self.add(name, entry))
+        In::new(self.add(spec.into(), entry), self.build.tree)
     }
 
     /// An input that merges several links with `mode` (`Sum`, `Append`).
     /// `default` is its value while nothing is linked; with links, it is
     /// cleared and the sources are merged in every step.
-    pub fn input_merged<T: Merge>(&mut self, name: &str, default: T, mode: MergeMode) -> In<T> {
+    pub fn input_merged<T: Merge>(&mut self, spec: impl Into<Spec>, default: T, mode: MergeMode) -> In<T> {
+        let spec = spec.into();
         if !T::supports(mode) {
-            self.error(format!("input {name:?}: {} doesn't support {mode:?}", std::any::type_name::<T>()));
+            self.error(format!("input {:?}: {} doesn't support {mode:?}", spec.label, std::any::type_name::<T>()));
         }
         let entry = PortEntry {
             value: Some(Box::new(default)),
@@ -253,45 +289,65 @@ impl Registrar<'_> {
             merge_fn: Some(merge_erased::<T> as MergeFn),
             ..PortEntry::new::<T>(InterfaceKind::In)
         };
-        In::new(self.add(name, entry))
+        In::new(self.add(spec, entry), self.build.tree)
     }
 
     /// An output, holding `initial` until the block first writes it.
-    pub fn output<T: Send + 'static>(&mut self, name: &str, initial: T) -> Out<T> {
+    pub fn output<T: Send + 'static>(&mut self, spec: impl Into<Spec>, initial: T) -> Out<T> {
         let entry = PortEntry { value: Some(Box::new(initial)), ..PortEntry::new::<T>(InterfaceKind::Out) };
-        Out::new(self.add(name, entry))
+        Out::new(self.add(spec.into(), entry), self.build.tree)
     }
 
     /// An inbox: receives messages from any number of outboxes, in this
     /// workstream or others. `delivery`: keep every message (up to a
     /// capacity, dropping the oldest) or only the latest.
-    pub fn inbox<M: Message>(&mut self, name: &str, delivery: Delivery) -> Inbox<M> {
+    pub fn inbox<M: Message>(&mut self, spec: impl Into<Spec>, delivery: Delivery) -> Inbox<M> {
         let entry = PortEntry { mail: Some(mail_fns::<M>()), delivery, ..PortEntry::new::<M>(InterfaceKind::Inbox) };
-        Inbox::new(self.add(name, entry))
+        Inbox::new(self.add(spec.into(), entry), self.build.tree)
     }
 
     /// An outbox: sends messages to every inbox linked to it (none: they're
     /// dropped). Never blocks.
-    pub fn outbox<M: Message>(&mut self, name: &str) -> Outbox<M> {
+    pub fn outbox<M: Message>(&mut self, spec: impl Into<Spec>) -> Outbox<M> {
         let entry = PortEntry { mail: Some(mail_fns::<M>()), ..PortEntry::new::<M>(InterfaceKind::Outbox) };
-        Outbox::new(self.add(name, entry))
+        Outbox::new(self.add(spec.into(), entry), self.build.tree)
     }
 
-    /// Add `block` as a child called `name`. It registers right away; its
-    /// non-private interfaces float up into this block's dictionary as
-    /// `name/...`.
-    pub fn child<B: Block>(&mut self, name: &str, mut block: B) -> Child<B> {
-        self.check_name(name);
-        let parent = &self.build.blocks[self.block as usize];
-        let path = if parent.path.is_empty() { name.to_owned() } else { format!("{}/{name}", parent.path) };
-        let id = self.build.blocks.len() as u32;
-        self.build.blocks.push(BlockEntry::new(name.to_owned(), path));
-        self.build.blocks[self.block as usize].children.push(id);
-        let mut r = Registrar { build: self.build, block: id };
+    /// Add `block` as a child. Its ID is derived from this block's ID and
+    /// `spec.key`, so it's the same on every build. It registers right
+    /// away; its non-private interfaces float up into this block's
+    /// dictionary.
+    pub fn child<B: Block>(&mut self, spec: impl Into<Spec>, block: B) -> Child<B> {
+        let spec = spec.into();
+        let id = self.id().child(spec.key);
+        self.child_with_id(id, spec.label, block)
+    }
+
+    /// Add `block` as a child with an explicit ID: for children created
+    /// from data (a patch file), whose IDs are stored with them.
+    pub fn child_with_id<B: Block>(
+        &mut self,
+        id: BlockId,
+        label: impl Into<std::borrow::Cow<'static, str>>,
+        mut block: B,
+    ) -> Child<B> {
+        let label = label.into().into_owned();
+        let taken = self.build.blocks[self.block as usize]
+            .children
+            .iter()
+            .any(|&c| self.build.blocks[c as usize].id == id);
+        if taken {
+            self.error(format!("two children have the same ID {id} (the second is labelled {label:?})"));
+        }
+        let path = join(self.path(), &label);
+        let index = self.build.blocks.len() as u32;
+        self.build.blocks.push(BlockEntry::new(id, label, path));
+        self.build.blocks[self.block as usize].children.push(index);
+        let mut r = Registrar { build: self.build, block: index };
         block.register_ports(&mut r);
         block.register(&mut r);
-        self.build.blocks[id as usize].block = Some(Box::new(block));
-        Child::new(id)
+        self.build.blocks[index as usize].block = Some(Box::new(block));
+        Child::new(index, self.build.tree)
     }
 
     /// A child registered earlier, as its own type, to read its handles
@@ -309,32 +365,36 @@ impl Registrar<'_> {
         self.build.blocks[self.block as usize].hidden.push(port);
     }
 
-    /// Also expose `port` (own, or exposed by a child) under `name`: a
-    /// second name for the same interface, not a link.
-    pub fn alias(&mut self, name: &str, port: impl PortHandle) {
-        self.check_name(name);
+    /// Also expose `port` (own, or exposed by a child) as an interface of
+    /// this block, under its own key and label: a second identity for the
+    /// same interface, not a link.
+    pub fn alias(&mut self, spec: impl Into<Spec>, port: impl PortHandle) {
+        let spec = spec.into();
+        self.check_key(spec.key, &spec.label);
         let port = port.port_index();
-        self.build.blocks[self.block as usize].aliases.push((name.to_owned(), port));
+        self.build.blocks[self.block as usize].aliases.push((spec.key, spec.label.into_owned(), port));
     }
 
-    fn add(&mut self, name: &str, entry: PortEntry) -> u32 {
-        self.check_name(name);
+    fn add(&mut self, spec: Spec, entry: PortEntry) -> u32 {
+        self.check_key(spec.key, &spec.label);
         let index = self.build.ports.len() as u32;
-        self.build.ports.push(PortEntry { owner: self.block, name: name.to_owned(), ..entry });
+        self.build.ports.push(PortEntry { owner: self.block, key: spec.key, label: spec.label.into_owned(), ..entry });
         self.build.blocks[self.block as usize].ports.push(index);
         index
     }
 
-    /// Names are path segments: unique within the block, no `/`.
-    fn check_name(&mut self, name: &str) {
+    /// Keys identify interfaces within a block, so they must be unique
+    /// (across ports, mailboxes and aliases). Labels may repeat.
+    fn check_key(&mut self, key: Key, label: &str) {
         let entry = &self.build.blocks[self.block as usize];
-        let taken = entry.ports.iter().any(|&p| self.build.ports[p as usize].name == name)
-            || entry.children.iter().any(|&c| self.build.blocks[c as usize].name == name)
-            || entry.aliases.iter().any(|(a, _)| a == name);
-        if name.is_empty() || name.contains('/') {
-            self.error(format!("invalid name {name:?} (must be non-empty, without '/')"));
-        } else if taken {
-            self.error(format!("name {name:?} is used twice"));
+        let clash = entry
+            .ports
+            .iter()
+            .map(|&p| (self.build.ports[p as usize].key, self.build.ports[p as usize].label.clone()))
+            .chain(entry.aliases.iter().map(|(k, l, _)| (*k, l.clone())))
+            .find(|(k, _)| *k == key);
+        if let Some((_, other)) = clash {
+            self.error(format!("{label:?} and {other:?} have the same key {key:?} (give one an explicit id)"));
         }
     }
 
@@ -345,12 +405,13 @@ impl Registrar<'_> {
 }
 
 impl PortEntry {
-    /// An entry of `kind` carrying `T`, everything else empty; owner and
-    /// name are filled in by `Registrar::add`.
+    /// An entry of `kind` carrying `T`, everything else empty; owner, key
+    /// and label are filled in by `Registrar::add`.
     fn new<T: 'static>(kind: InterfaceKind) -> Self {
         Self {
             owner: u32::MAX,
-            name: String::new(),
+            key: Key::new(0),
+            label: String::new(),
             kind,
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>(),
@@ -369,10 +430,16 @@ impl PortEntry {
 /// Handed to [`Block::load`].
 pub struct LoadContext<'a> {
     path: &'a str,
+    id: BlockId,
 }
 
 impl LoadContext<'_> {
-    /// The loading block's path from the root.
+    /// The loading block's identity.
+    pub fn id(&self) -> BlockId {
+        self.id
+    }
+
+    /// For display: the loading block's labels from the root.
     pub fn path(&self) -> &str {
         self.path
     }
@@ -393,32 +460,39 @@ impl Linker<'_> {
     /// Link an output to an input. Both must be exposed by children of this
     /// block (at any depth, unless something marked them private).
     pub fn connect<T: 'static>(&mut self, from: Out<T>, to: In<T>) -> Result<(), LinkError> {
-        if !from.is_registered() || !to.is_registered() {
-            return Err(LinkError::Unregistered);
-        }
-        self.link(from.index, to.index)
+        let (from, to) = (self.local(&from)?, self.local(&to)?);
+        self.link(from, to)
     }
 
     /// Link an outbox to an inbox (both exposed by children). Several
     /// outboxes may feed one inbox, and one outbox may feed several inboxes.
     pub fn connect_mail<M: 'static>(&mut self, from: Outbox<M>, to: Inbox<M>) -> Result<(), LinkError> {
-        if !from.is_registered() || !to.is_registered() {
-            return Err(LinkError::Unregistered);
-        }
-        self.link(from.index, to.index)
+        let (from, to) = (self.local(&from)?, self.local(&to)?);
+        self.link(from, to)
     }
 
-    /// Link by path, relative to this block (`"osc/out"`, `"filter/input"`),
-    /// for wiring that comes from data rather than code: output → input, or
-    /// outbox → inbox. Types are checked when linking.
-    pub fn connect_paths(&mut self, from: &str, to: &str) -> Result<(), LinkError> {
+    /// Link by ID, for wiring that comes from data (a patch file, the
+    /// editor): output → input or outbox → inbox. Types are checked when
+    /// linking.
+    pub fn connect_ids(&mut self, from: InterfaceId, to: InterfaceId) -> Result<(), LinkError> {
         let from = self.lookup(from)?;
         let to = self.lookup(to)?;
         self.link(from, to)
     }
 
-    /// The interfaces this block's children expose, with paths relative to
-    /// this block (what `connect_paths` accepts).
+    /// The linking block's identity.
+    pub fn id(&self) -> BlockId {
+        self.build.blocks[self.block as usize].id
+    }
+
+    /// A child's identity (to build [`InterfaceId`]s for `connect_ids`).
+    pub fn id_of<B: Block>(&self, child: Child<B>) -> BlockId {
+        child_of(self.build, child);
+        self.build.blocks[child.index as usize].id
+    }
+
+    /// The interfaces this block's children expose (what `connect_ids`
+    /// accepts), with display paths relative to this block.
     pub fn available(&self) -> Vec<Interface> {
         let entry = &self.build.blocks[self.block as usize];
         entry
@@ -426,17 +500,30 @@ impl Linker<'_> {
             .iter()
             .flat_map(|&c| {
                 let child = &self.build.blocks[c as usize];
-                child.dictionary.iter().map(|i| Interface { path: format!("{}/{}", child.name, i.path), ..i.clone() })
+                child.dictionary.iter().map(|i| Interface { path: join(&child.label, &i.path), ..i.clone() })
             })
             .collect()
     }
 
-    fn lookup(&self, path: &str) -> Result<u32, LinkError> {
-        self.available()
-            .into_iter()
-            .find(|i| i.path == path)
+    fn local(&self, handle: &impl PortHandle) -> Result<u32, LinkError> {
+        if handle.port_tree() == u32::MAX {
+            Err(LinkError::Unregistered)
+        } else if handle.port_tree() != self.build.tree {
+            Err(LinkError::ForeignHandle)
+        } else {
+            Ok(handle.port_index())
+        }
+    }
+
+    fn lookup(&self, id: InterfaceId) -> Result<u32, LinkError> {
+        let entry = &self.build.blocks[self.block as usize];
+        entry
+            .children
+            .iter()
+            .flat_map(|&c| &self.build.blocks[c as usize].dictionary)
+            .find(|i| i.id == id)
             .map(|i| i.port)
-            .ok_or_else(|| LinkError::UnknownPath(path.to_owned()))
+            .ok_or(LinkError::UnknownInterface(id))
     }
 
     fn visible(&self, port: u32) -> bool {
@@ -492,8 +579,10 @@ impl<B: Block> Index<Child<B>> for Linker<'_> {
 }
 
 fn child_of<B: Block>(build: &Build, child: Child<B>) -> &B {
-    let block = build.blocks.get(child.index as usize).and_then(|e| e.block.as_deref());
+    let block = (child.tree == build.tree)
+        .then(|| build.blocks.get(child.index as usize).and_then(|e| e.block.as_deref()))
+        .flatten();
     block
         .and_then(|b| (b as &dyn Any).downcast_ref::<B>())
-        .unwrap_or_else(|| panic!("{child:?} isn't a registered child of this type"))
+        .unwrap_or_else(|| panic!("{child:?} isn't a registered child of this type in this tree"))
 }

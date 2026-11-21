@@ -1,21 +1,25 @@
 //! [`Engine`]: the workstreams of a process and the mailbox links between
 //! them.
 
+use std::any::TypeId;
+
 use crate::{
-    AccessError, Delivery, InterfaceKind, MailReceiver, MailSender, Message, Workstream,
+    AccessError, Block, Child, Delivery, Inbox, InterfaceId, InterfaceKind, MailReceiver, MailSender, Message,
+    Outbox, PortHandle, Workstream, WorkstreamId,
     mail::receiver,
 };
 
+/// Engine failures. Paths in messages are display labels.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum EngineError {
-    #[error("a workstream called {0:?} already exists")]
-    DuplicateWorkstream(String),
-    #[error("no workstream called {0:?}")]
-    UnknownWorkstream(String),
-    #[error("{0:?} isn't a mailbox path (expected \"workstream:path\")")]
-    BadPath(String),
-    #[error("{path:?}: {source}")]
-    Access { path: String, source: AccessError },
+    #[error("no workstream {0:?} in this engine")]
+    UnknownWorkstream(WorkstreamId),
+    #[error("the handle's workstream isn't in this engine")]
+    ForeignHandle,
+    #[error("no workstream in this engine exposes {0:?}")]
+    UnknownInterface(InterfaceId),
+    #[error(transparent)]
+    Access(#[from] AccessError),
     #[error("{0:?} must be an outbox")]
     NotAnOutbox(String),
     #[error("{0:?} must be an inbox")]
@@ -29,26 +33,27 @@ pub enum EngineError {
     NotRealtimeSafe { path: String, type_name: &'static str },
 }
 
-/// The workstreams of a process, by name, and the mailbox links between
-/// them.
+/// The workstreams of a process, and the mailbox links between them.
 ///
 /// ```ignore
 /// let mut engine = Engine::new();
-/// engine.add("audio", Workstream::build_realtime(audio_root)?)?;
-/// engine.add("render", Workstream::build(render_root)?)?;
-/// engine.connect_mail("audio:meter/level", "render:visuals/level")?;
-/// let midi_in = engine.sender::<MidiEvent>("audio:midi")?;   // for the MIDI thread
-/// let audio = engine.take("audio").unwrap();                  // move to its thread
+/// let audio = engine.add("audio", Workstream::build_realtime(AudioRoot::default())?);
+/// let render = engine.add("render", Workstream::build(RenderRoot::default())?);
+///
+/// let meter = engine.get(engine.root::<AudioRoot>(audio)?.meter)?;
+/// let visuals = engine.get(engine.root::<RenderRoot>(render)?.visuals)?;
+/// engine.connect_mail(meter.level, visuals.level)?;      // typed handles
+/// let midi = engine.sender(meter.notes)?;                 // for the MIDI thread
+/// let audio = engine.take(audio).unwrap();                // move to its thread
 /// ```
 ///
-/// Only mailboxes connect workstreams: they have no ports in common, so an
-/// `In`/`Out` link across workstreams can't even be expressed (decision 5).
-///
-/// Paths are `workstream:path`, where `path` is an interface of the
-/// workstream's root block (`audio:instrument/level`; a leading `/` after
-/// the colon is allowed).
+/// Handles know their workstream, so connecting needs nothing else. Data
+/// (patch files, the editor) uses [`InterfaceId`]s instead
+/// (`connect_mail_ids`). Only mailboxes connect workstreams: the engine
+/// has no way to link `In`/`Out` across them (decision 5).
 #[derive(Default)]
 pub struct Engine {
+    /// (label, workstream)
     workstreams: Vec<(String, Workstream)>,
 }
 
@@ -57,81 +62,110 @@ impl Engine {
         Self::default()
     }
 
-    /// Add a built workstream under `name`.
-    pub fn add(&mut self, name: &str, workstream: Workstream) -> Result<(), EngineError> {
-        if self.index(name).is_ok() {
-            return Err(EngineError::DuplicateWorkstream(name.to_owned()));
-        }
-        self.workstreams.push((name.to_owned(), workstream));
-        Ok(())
+    /// Add a built workstream. `label` is for display only.
+    pub fn add(&mut self, label: &str, workstream: Workstream) -> WorkstreamId {
+        let id = WorkstreamId(workstream.tree());
+        self.workstreams.push((label.to_owned(), workstream));
+        id
     }
 
-    /// Link the outbox at `from` to the inbox at `to` (e.g.
-    /// `"audio:meter/level"` → `"render:visuals/level"`). The workstreams may
-    /// be the same or different.
-    pub fn connect_mail(&mut self, from: &str, to: &str) -> Result<(), EngineError> {
-        let (from_ws, from_port) = self.resolve(from)?;
-        let (to_ws, to_port) = self.resolve(to)?;
+    /// Link an outbox to an inbox, in the same workstream or different
+    /// ones. Both must be exposed by their roots.
+    pub fn connect_mail<M: Message>(&mut self, from: Outbox<M>, to: Inbox<M>) -> Result<(), EngineError> {
+        let (from_ws, from_port) = self.locate(&from)?;
+        let (to_ws, to_port) = self.locate(&to)?;
+        self.connect_ports(from_ws, from_port, to_ws, to_port)
+    }
+
+    /// Like [`connect_mail`](Self::connect_mail), by ID: for wiring that
+    /// comes from data. Kinds and types are checked here.
+    pub fn connect_mail_ids(&mut self, from: InterfaceId, to: InterfaceId) -> Result<(), EngineError> {
+        let (from_ws, from_port) = self.find_id(from)?;
+        let (to_ws, to_port) = self.find_id(to)?;
         let source = &self.workstreams[from_ws].1;
         let target = &self.workstreams[to_ws].1;
         if source.kind(from_port) != InterfaceKind::Outbox {
-            return Err(EngineError::NotAnOutbox(from.to_owned()));
+            return Err(EngineError::NotAnOutbox(source.path_of(from_port).to_owned()));
         }
         if target.kind(to_port) != InterfaceKind::Inbox {
-            return Err(EngineError::NotAnInbox(to.to_owned()));
+            return Err(EngineError::NotAnInbox(target.path_of(to_port).to_owned()));
         }
         let ((from_id, from_type), (to_id, to_type)) = (source.type_of(from_port), target.type_of(to_port));
         if from_id != to_id {
-            return Err(EngineError::TypeMismatch { from: from.into(), from_type, to: to.into(), to_type });
+            return Err(EngineError::TypeMismatch {
+                from: source.path_of(from_port).to_owned(),
+                from_type,
+                to: target.path_of(to_port).to_owned(),
+                to_type,
+            });
         }
-        self.check_realtime(from_ws, from_port, from)?;
-        let mailbox = target.mailbox_of(to_port).expect("inboxes have mailboxes");
-        let added = self.workstreams[from_ws].1.add_target(from_port, mailbox);
-        debug_assert!(added, "types were checked");
-        Ok(())
+        self.connect_ports(from_ws, from_port, to_ws, to_port)
     }
 
-    /// A handle for sending into the inbox at `path` from outside any
-    /// block, e.g. from a MIDI callback thread.
-    pub fn sender<M: Message>(&self, path: &str) -> Result<MailSender<M>, EngineError> {
-        let (ws, port) = self.resolve(path)?;
-        let workstream = &self.workstreams[ws].1;
-        if workstream.kind(port) != InterfaceKind::Inbox {
-            return Err(EngineError::NotAnInbox(path.to_owned()));
-        }
-        let mailbox = workstream.typed_mailbox::<M>(port).ok_or_else(|| self.type_error(path, ws, port))?;
+    /// A handle for sending into an inbox from outside any block, e.g. from
+    /// a MIDI callback thread.
+    pub fn sender<M: Message>(&self, inbox: Inbox<M>) -> Result<MailSender<M>, EngineError> {
+        let (ws, port) = self.locate(&inbox)?;
+        let mailbox = self.workstreams[ws].1.typed_mailbox::<M>(port).expect("typed handle, inbox");
         Ok(MailSender { mailbox })
     }
 
-    /// Receive what the outbox at `path` sends, outside any block (a test,
-    /// the host's loop). `delivery` sets this receiver's own queue.
-    pub fn listen<M: Message>(&mut self, path: &str, delivery: Delivery) -> Result<MailReceiver<M>, EngineError> {
-        let (ws, port) = self.resolve(path)?;
+    /// Like [`sender`](Self::sender), by ID.
+    pub fn sender_id<M: Message>(&self, inbox: InterfaceId) -> Result<MailSender<M>, EngineError> {
+        let (ws, port) = self.find_id(inbox)?;
+        let workstream = &self.workstreams[ws].1;
+        if workstream.kind(port) != InterfaceKind::Inbox {
+            return Err(EngineError::NotAnInbox(workstream.path_of(port).to_owned()));
+        }
+        let mailbox = workstream.typed_mailbox::<M>(port).ok_or_else(|| wrong_type(workstream, port))?;
+        Ok(MailSender { mailbox })
+    }
+
+    /// Receive what an outbox sends, outside any block (a test, the host's
+    /// loop). `delivery` sets this receiver's own queue.
+    pub fn listen<M: Message>(&mut self, outbox: Outbox<M>, delivery: Delivery) -> Result<MailReceiver<M>, EngineError> {
+        let (ws, port) = self.locate(&outbox)?;
+        self.listen_port(ws, port, delivery)
+    }
+
+    /// Like [`listen`](Self::listen), by ID.
+    pub fn listen_id<M: Message>(&mut self, outbox: InterfaceId, delivery: Delivery) -> Result<MailReceiver<M>, EngineError> {
+        let (ws, port) = self.find_id(outbox)?;
         let workstream = &self.workstreams[ws].1;
         if workstream.kind(port) != InterfaceKind::Outbox {
-            return Err(EngineError::NotAnOutbox(path.to_owned()));
+            return Err(EngineError::NotAnOutbox(workstream.path_of(port).to_owned()));
         }
-        if workstream.type_of(port).0 != std::any::TypeId::of::<M>() {
-            return Err(self.type_error(path, ws, port));
+        if workstream.type_of(port).0 != TypeId::of::<M>() {
+            return Err(wrong_type(workstream, port));
         }
-        self.check_realtime(ws, port, path)?;
-        let (receiver, mailbox) = receiver::<M>(delivery);
-        self.workstreams[ws].1.add_target(port, mailbox);
-        Ok(receiver)
+        self.listen_port(ws, port, delivery)
     }
 
-    pub fn workstream(&self, name: &str) -> Option<&Workstream> {
-        self.workstreams.iter().find(|(n, _)| n == name).map(|(_, w)| w)
+    /// A workstream's root block, as its own type: where reaching handles
+    /// from outside starts.
+    pub fn root<R: Block>(&self, id: WorkstreamId) -> Result<&R, EngineError> {
+        let workstream = self.workstream(id).ok_or(EngineError::UnknownWorkstream(id))?;
+        workstream.root::<R>().ok_or(EngineError::Access(AccessError::ForeignHandle))
     }
 
-    pub fn workstream_mut(&mut self, name: &str) -> Option<&mut Workstream> {
-        self.workstreams.iter_mut().find(|(n, _)| n == name).map(|(_, w)| w)
+    /// A block anywhere in the engine, as its own type.
+    pub fn get<B: Block>(&self, child: Child<B>) -> Result<&B, EngineError> {
+        let workstream = self.workstreams.iter().find(|(_, w)| w.tree() == child.tree).ok_or(EngineError::ForeignHandle)?;
+        workstream.1.get(child).ok_or(EngineError::ForeignHandle)
+    }
+
+    pub fn workstream(&self, id: WorkstreamId) -> Option<&Workstream> {
+        self.workstreams.iter().find(|(_, w)| w.tree() == id.0).map(|(_, w)| w)
+    }
+
+    pub fn workstream_mut(&mut self, id: WorkstreamId) -> Option<&mut Workstream> {
+        self.workstreams.iter_mut().find(|(_, w)| w.tree() == id.0).map(|(_, w)| w)
     }
 
     /// Remove a workstream, typically to move it to the thread that steps
     /// it. Its mailbox links stay intact (they're shared queues).
-    pub fn take(&mut self, name: &str) -> Option<Workstream> {
-        let index = self.index(name).ok()?;
+    pub fn take(&mut self, id: WorkstreamId) -> Option<Workstream> {
+        let index = self.workstreams.iter().position(|(_, w)| w.tree() == id.0)?;
         Some(self.workstreams.remove(index).1)
     }
 
@@ -143,40 +177,57 @@ impl Engine {
         }
     }
 
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.workstreams.iter().map(|(n, _)| n.as_str())
+    /// The workstreams, with their display labels.
+    pub fn workstreams(&self) -> impl Iterator<Item = (WorkstreamId, &str)> {
+        self.workstreams.iter().map(|(label, w)| (WorkstreamId(w.tree()), label.as_str()))
     }
 
-    fn index(&self, name: &str) -> Result<usize, EngineError> {
+    // ---- helpers -------------------------------------------------------------------
+
+    /// A handle → (workstream index, port), checking it's exposed.
+    fn locate(&self, handle: &impl PortHandle) -> Result<(usize, usize), EngineError> {
+        let ws = self.workstreams.iter().position(|(_, w)| w.tree() == handle.port_tree()).ok_or(EngineError::ForeignHandle)?;
+        Ok((ws, self.workstreams[ws].1.handle(handle)?))
+    }
+
+    fn find_id(&self, id: InterfaceId) -> Result<(usize, usize), EngineError> {
         self.workstreams
             .iter()
-            .position(|(n, _)| n == name)
-            .ok_or_else(|| EngineError::UnknownWorkstream(name.to_owned()))
+            .enumerate()
+            .find_map(|(i, (_, w))| w.by_id(id).ok().map(|port| (i, port)))
+            .ok_or(EngineError::UnknownInterface(id))
     }
 
-    /// `"ws:path"` → (workstream index, interface index).
-    fn resolve(&self, full: &str) -> Result<(usize, usize), EngineError> {
-        let (ws, path) = full.split_once(':').ok_or_else(|| EngineError::BadPath(full.to_owned()))?;
-        let index = self.index(ws)?;
-        let port = self.workstreams[index]
-            .1
-            .find(path)
-            .map_err(|source| EngineError::Access { path: full.to_owned(), source })?;
-        Ok((index, port))
-    }
-
-    fn check_realtime(&self, ws: usize, port: usize, path: &str) -> Result<(), EngineError> {
-        let workstream = &self.workstreams[ws].1;
-        if workstream.is_realtime() && workstream.drops(port) {
-            return Err(EngineError::NotRealtimeSafe { path: path.to_owned(), type_name: workstream.type_of(port).1 });
-        }
+    fn connect_ports(&mut self, from_ws: usize, from_port: usize, to_ws: usize, to_port: usize) -> Result<(), EngineError> {
+        self.check_realtime(from_ws, from_port)?;
+        let mailbox = self.workstreams[to_ws].1.mailbox_of(to_port).expect("inboxes have mailboxes");
+        let added = self.workstreams[from_ws].1.add_target(from_port, mailbox);
+        debug_assert!(added, "types were checked");
         Ok(())
     }
 
-    fn type_error(&self, path: &str, ws: usize, port: usize) -> EngineError {
-        EngineError::Access {
-            path: path.to_owned(),
-            source: AccessError::WrongType { path: path.to_owned(), actual: self.workstreams[ws].1.type_of(port).1 },
-        }
+    fn listen_port<M: Message>(&mut self, ws: usize, port: usize, delivery: Delivery) -> Result<MailReceiver<M>, EngineError> {
+        self.check_realtime(ws, port)?;
+        let (receiver, mailbox) = receiver::<M>(delivery);
+        self.workstreams[ws].1.add_target(port, mailbox);
+        Ok(receiver)
     }
+
+    fn check_realtime(&self, ws: usize, port: usize) -> Result<(), EngineError> {
+        let workstream = &self.workstreams[ws].1;
+        if workstream.is_realtime() && workstream.drops(port) {
+            return Err(EngineError::NotRealtimeSafe {
+                path: workstream.path_of(port).to_owned(),
+                type_name: workstream.type_of(port).1,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn wrong_type(workstream: &Workstream, port: usize) -> EngineError {
+    EngineError::Access(AccessError::WrongType {
+        path: workstream.path_of(port).to_owned(),
+        actual: workstream.type_of(port).1,
+    })
 }

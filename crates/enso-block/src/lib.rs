@@ -46,18 +46,22 @@
 //!
 //! let mut ws = Workstream::build(Patch::default()).unwrap();
 //! ws.step();
-//! assert_eq!(*ws.read::<f32>("double/out").unwrap(), 42.0);
+//! // Reach the output from outside by handle: no names involved.
+//! let out = ws.get(ws.root::<Patch>().unwrap().double).unwrap().out;
+//! assert_eq!(*ws.read(out).unwrap(), 42.0);
 //! ```
 
 mod block;
 mod build;
 mod engine;
+mod ids;
 mod mail;
 mod merge;
 mod workstream;
 
 pub use block::{Block, BlockError, Child, In, Inbox, Out, Outbox, PortHandle, Ports};
 pub use engine::{Engine, EngineError};
+pub use ids::{BlockId, InterfaceId, Key, Spec, WorkstreamId};
 pub use mail::{Delivery, MailReceiver, MailSender, Message, RealtimeMessage};
 /// `#[derive(Ports)]`; see the [`Ports`](trait@Ports) trait. A derive macro
 /// and a trait may share a name: they live in different namespaces (like
@@ -65,4 +69,4 @@ pub use mail::{Delivery, MailReceiver, MailSender, Message, RealtimeMessage};
 pub use enso_block_derive::Ports;
 pub use build::{BuildError, Interface, InterfaceKind, LinkError, Linker, LoadContext, Registrar};
 pub use merge::{Events, Merge, MergeMode, Stamped};
-pub use workstream::{AccessError, Io, Receive, Workstream};
+pub use workstream::{AccessError, BuildOptions, Io, Receive, ValuePort, Workstream};

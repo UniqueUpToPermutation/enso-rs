@@ -81,12 +81,23 @@ pub trait Block: Ports + Any + Send {
 /// }
 /// ```
 ///
-/// Attributes, applied in field order:
-/// - `#[input]` on `In<T>`: `name = "..."` (default: the field name),
-///   `default = expr` (default: `T::default()`), `merge = Single | Append | Sum`;
-/// - `#[output]` on `Out<T>`: `name`, `initial = expr`;
-/// - `#[child]` on `Child<B>`: `name`, `init = expr` (default: `B::default()`);
-/// - `#[private]` next to `#[input]`/`#[output]`: keep it from floating up.
+/// Attributes, applied in field order. Every one accepts:
+/// - `id = N`: the interface's [`Key`](crate::Key) (its identity within the
+///   block). Default: a hash of the **field** name, so renaming the field
+///   changes it; pin it with `id` to rename freely (decision 24);
+/// - `name = "..."`: the display label (default: the field name). Labels
+///   are never used for identity and may repeat (decision 23).
+///
+/// And per kind:
+/// - `#[input]` on `In<T>`: `default = expr` (default: `T::default()`),
+///   `merge = Single | Append | Sum`;
+/// - `#[output]` on `Out<T>`: `initial = expr`;
+/// - `#[inbox]` on `Inbox<M>`: `capacity = expr` or `latest`;
+/// - `#[outbox]` on `Outbox<M>`;
+/// - `#[child]` on `Child<B>`: `init = expr` (default: `B::default()`). The
+///   child's [`BlockId`](crate::BlockId) derives from this block's ID and the key;
+/// - `#[private]` next to a port or mailbox attribute: keep it from
+///   floating up.
 ///
 /// Blocks whose ports depend on configuration derive it too (with no
 /// attributes, or some) and add the rest in [`Block::register`].
@@ -103,12 +114,14 @@ macro_rules! handle {
         $(#[$doc])*
         pub struct $name<T> {
             pub(crate) index: u32,
+            /// The build (tree) this handle belongs to.
+            pub(crate) tree: u32,
             _type: PhantomData<fn() -> T>,
         }
 
         impl<T> $name<T> {
-            pub(crate) fn new(index: u32) -> Self {
-                Self { index, _type: PhantomData }
+            pub(crate) fn new(index: u32, tree: u32) -> Self {
+                Self { index, tree, _type: PhantomData }
             }
 
             /// True once registration assigned this handle.
@@ -129,7 +142,7 @@ macro_rules! handle {
 
         impl<T> PartialEq for $name<T> {
             fn eq(&self, other: &Self) -> bool {
-                self.index == other.index
+                self.index == other.index && self.tree == other.tree
             }
         }
 
@@ -139,13 +152,13 @@ macro_rules! handle {
         /// and fill their handles in `register`.
         impl<T> Default for $name<T> {
             fn default() -> Self {
-                Self::new(UNSET)
+                Self::new(UNSET, UNSET)
             }
         }
 
         impl<T> fmt::Debug for $name<T> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}<{}>({})", stringify!($name), std::any::type_name::<T>(), self.index)
+                write!(f, "{}<{}>({}:{})", stringify!($name), std::any::type_name::<T>(), self.tree, self.index)
             }
         }
     };
@@ -181,11 +194,16 @@ handle!(
 pub trait PortHandle {
     #[doc(hidden)]
     fn port_index(&self) -> u32;
+    #[doc(hidden)]
+    fn port_tree(&self) -> u32;
 }
 
 impl<T> PortHandle for In<T> {
     fn port_index(&self) -> u32 {
         self.index
+    }
+    fn port_tree(&self) -> u32 {
+        self.tree
     }
 }
 
@@ -193,16 +211,25 @@ impl<T> PortHandle for Out<T> {
     fn port_index(&self) -> u32 {
         self.index
     }
+    fn port_tree(&self) -> u32 {
+        self.tree
+    }
 }
 
 impl<T> PortHandle for Inbox<T> {
     fn port_index(&self) -> u32 {
         self.index
     }
+    fn port_tree(&self) -> u32 {
+        self.tree
+    }
 }
 
 impl<T> PortHandle for Outbox<T> {
     fn port_index(&self) -> u32 {
         self.index
+    }
+    fn port_tree(&self) -> u32 {
+        self.tree
     }
 }

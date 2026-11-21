@@ -10,3 +10,4 @@ crossbeam-queue.workspace = true
 enso-block-derive.workspace = true
 enso-core.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
