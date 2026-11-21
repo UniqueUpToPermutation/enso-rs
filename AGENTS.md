@@ -81,6 +81,9 @@ cargo doc -p enso-visual --no-deps --open           # browse the public API
 - [dependency-notes.md](docs/agents/dependency-notes.md): API gotchas in wgpu 30 / glam 0.34 / winit 0.30
 - [workflow.md](docs/agents/workflow.md): verifying changes, Windows shell quirks, git conventions
 - [decisions.md](docs/agents/decisions.md): decision log with reasons; append to it
+- [design/blocks.md](docs/design/blocks.md): **the block compute platform** (blocks, ports,
+  mailboxes, workstreams, engine, ECS). The planned foundation for audio, render, sim and UI;
+  read it before structural work
 
 Keep this wiki current: if you change a design or learn a non-obvious fact,
 update the matching page in the same change.
