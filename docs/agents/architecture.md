@@ -7,7 +7,7 @@ enso/
 ├── crates/
 │   ├── enso-core/    shared plain types: Clock/Timestamp, MIDI messages  ← exists (no deps)
 │   ├── enso-io/      MIDI in/out (midir) ← exists; asset loading, file watching planned
-│   ├── enso-audio/   rewireable node graph, cpal output, test synth  ← exists
+│   ├── enso-audio/   AudioEngine trait over a block workstream, cpal output  ← exists
 │   ├── enso-plugin/  (planned) VST3 hosting behind a safe API; plugins become audio nodes
 │   ├── enso-visual/  wgpu renderer                                  ← exists
 │   ├── enso-engine/  bevy_ecs world + systems; bridges io/audio/visual

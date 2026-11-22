@@ -1,13 +1,66 @@
 # enso-audio
 
-The audio engine, **built on the block platform** (`enso-block`; design:
-[design/blocks.md](../design/blocks.md), build-order step 4). A patch is a
-tree of blocks in a **real-time workstream**; an `enso_block::Engine` on the
+The audio engine. Its **public interface mirrors enso-visual's**: an
+`AudioEngine` trait (`lib.rs`) implemented by `BlockAudioEngine`, with
+resources (nodes) created up front and a plain-data `AudioWorld` submitted
+per tick. **Underneath, and private,** it runs on the block platform
+(`enso-block`; design: [design/blocks.md](../design/blocks.md)): a tree of
+blocks in a **real-time workstream**; an `enso_block::Engine` on the
 control thread builds and rebuilds it; an `AudioDriver` steps it from the
 sound card's callback. Platform-agnostic: cpal 0.18 (WASAPI, CoreAudio,
 ALSA/PipeWire). Nothing in the engine is OS-specific; keep it that way.
 
-## Shape
+## The interface (what users see)
+
+| enso-visual | enso-audio |
+|---|---|
+| `Renderer` trait / `WgpuRenderer` | `AudioEngine` trait / `BlockAudioEngine` |
+| `create_mesh`, `create_material`… → `Copy` IDs | `create_node(&NodeDesc)` / `update_node` / `destroy_node` → `NodeId` |
+| `material_params` + `material_param::<T>(id, "name")` → `Param<T>` | `node_params` + `param::<T>(node, "name")` → `Param<T>` (also `node_inputs`/`node_outputs`, `input`/`output(node, "name")` → pins) |
+| `RenderWorld` (draws, `set_param`) | `AudioWorld` (`connect(from, to)`, `set_param`) |
+| `render(target, prev, curr, alpha)` | `submit(&world)` |
+| subrenderers private | blocks, `AudioDriver`, `enso_block` private |
+| fake in `tests/renderer_trait.rs` | fake in `tests/audio_engine_trait.rs` |
+
+- `node.rs`: `NodeId` (counter, never reused; `NodeId::SPEAKERS` = 0, built
+  in), `NodeDesc` (enum, plain data; static `title`/`inputs`/`outputs`/
+  `params`), `Signal`, `PinInfo`, `ParamInfo` (range, default, log scale,
+  unit), `InputPin`/`OutputPin` (node + index; a bare `NodeId` is index 0),
+  `Param<T>` (a hashed name: `ParamKey`), sealed `ParamType` (`f32` only).
+  **Pin and param names are the blocks' field names**, so
+  `Key::named(name)` is the block interface's key.
+- `world.rs`: `AudioWorld { wires, params }`. Wiring is the whole truth
+  each submit (a free graph); **params persist** until set again;
+  wires/params naming destroyed nodes are skipped.
+- `engine.rs`: `BlockAudioEngine`, `AudioError`, `MidiSender` (a cloneable
+  `Arc<dyn Fn(MidiEvent)>`, so fakes can make one too).
+  - `submit` = `spec(world)` (validates pins and signals →
+    `PatchSpec`), rebuild if it differs from `applied` (a failing spec is
+    remembered in `failed` and its error returned again without
+    rebuilding; `Busy` isn't remembered), then `set_id` for param values
+    that differ from `sent`, then `collect_garbage`.
+  - Node changes are recorded immediately and applied by the next submit
+    (batched into one rebuild).
+  - `start(device, clock)` moves the driver to the device;
+    `render(out, channels, now)` steps it offline (tests, no device).
+- `patch.rs` (private): `PatchRoot`, the data-defined composite: fixed
+  `MidiSource` and `AudioOut` children, one `child_with_id(node's random
+  BlockId)` per node, "MIDI in" nodes are `MidiFilter`s fed from the
+  source, wires via `connect_ids` (`Endpoint::Speakers` → the `AudioOut`
+  input).
+- Live MIDI bypasses ticks (`MidiSender` → `MidiSource` inbox) for
+  latency. A future **sequencer will be a node** (on the audio thread), not
+  something that feeds the world per tick (owner, 2026-11-22).
+
+### Adding a node kind
+
+1. The block in `src/blocks/` (knobs as `In<f32>` with `DEFAULT_*`
+   consts, state as `#[state]`).
+2. A `NodeDesc` variant and its `title`/`inputs`/`outputs`/`params` (names
+   = field names) in `node.rs`; an arm in `PatchRoot::register`.
+3. Use it in `tests/no_alloc.rs`; add it to the editor's `MENU`.
+
+## Shape (underneath)
 
 ```
 control thread                                    audio thread (device callback)
@@ -65,8 +118,8 @@ any thread ◀──StatsHandle (atomics)─────────────
 
 ## Real-time rules, enforced
 
-- `tests/no_alloc.rs`: `assert_no_alloc` around `driver.render` through
-  MIDI, every block, knob changes and **rebuilds** (swaps apply inside
+- `tests/no_alloc.rs`: `assert_no_alloc` around `BlockAudioEngine::render`
+  through MIDI, every node kind, param changes and **rewiring** (swaps apply inside
   `step`). Extend it when adding blocks.
 - Blocks must not allocate in `process`: push to `Events` (bounded), write
   into preallocated `AudioBuf`s, keep `Vec`s within capacity.
@@ -76,19 +129,25 @@ any thread ◀──StatsHandle (atomics)─────────────
 ## Using it (see `examples/play.rs`)
 
 ```rust
-let mut engine = Engine::new();
-let audio = engine.add("audio", Workstream::build_realtime(Patch::new(config))?);
-let root = engine.root::<Patch>(audio)?;
-let midi = engine.sender(engine.get(root.source)?.input)?;   // for MIDI threads
-let output = engine.get(root.output)?.input;
-let driver = AudioDriver::new(engine.take(audio).unwrap(), output, config);
-let stream = device.start(driver, clock)?;
-engine.rebuild(audio, Patch::other(config))?;                // while it plays
+let mut audio = BlockAudioEngine::new(device.audio_config());
+let synth = audio.create_node(&NodeDesc::TestSynth)?;
+let filter = audio.create_node(&NodeDesc::LowPass)?;
+let cutoff = audio.param::<f32>(filter, "cutoff")?;
+let stream = audio.start(device, clock)?;          // or audio.render(..) offline
+let midi = audio.midi_sender();                    // for MIDI threads
+
+// each tick:
+world.clear();
+world.connect(midi_in, synth);
+world.connect(synth, filter);
+world.connect(filter, NodeId::SPEAKERS);
+world.set_param(filter, cutoff, 800.0);
+audio.submit(&world)?;                             // rewiring while it plays
 ```
 
-A crate using `#[derive(Ports)]` must depend on `enso-block` directly (the
-generated code names `::enso_block`); the `enso_audio::enso_block`
-re-export isn't enough.
+Tests: `tests/audio_engine.rs` (public API, offline), `tests/audio_engine_trait.rs`
+(a fake), `tests/no_alloc.rs` (public API), and block-level unit tests in
+`src/tests.rs` (custom blocks, timing to the frame, speaker safety).
 
 ## Next
 

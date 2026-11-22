@@ -38,7 +38,7 @@ pub struct Stats {
     /// Time spent computing the latest buffer, as a fraction of the time it
     /// lasts. Must stay well below 1.0, or you hear dropouts.
     pub load: f32,
-    /// Highest `load` since the previous [`StatsHandle::read`].
+    /// Highest `load` since stats were last read.
     pub peak_load: f32,
     /// Blocks switched off because they panicked.
     pub disabled_blocks: u32,
@@ -99,14 +99,6 @@ impl AudioDriver {
     /// For reading statistics from other threads.
     pub fn stats(&self) -> StatsHandle {
         StatsHandle(self.stats.clone())
-    }
-
-    pub fn workstream(&self) -> &Workstream {
-        &self.workstream
-    }
-
-    pub fn workstream_mut(&mut self) -> &mut Workstream {
-        &mut self.workstream
     }
 
     /// Fill `output` (interleaved, `channels` samples per frame, as sound

@@ -1,19 +1,15 @@
 //! The audio thread must never allocate: allocation can take a lock inside
 //! the allocator and stall for an unbounded time. This test installs an
 //! allocator that **aborts** on any allocation inside `assert_no_alloc`, and
-//! drives the driver through everything it does live: MIDI, chunking, every
-//! block, knob changes, and rebuilds swapped in mid-performance.
+//! drives the engine through everything it does live: MIDI, chunking, every
+//! node kind, parameter changes, and rewiring swapped in mid-performance.
 //!
 //! (It's its own test binary because the global allocator is per binary.)
 
 use std::time::Duration;
 
 use assert_no_alloc::{AllocDisabler, assert_no_alloc};
-use enso_audio::{
-    AudioConfig, AudioDriver,
-    blocks::{AudioOut, Delay, Gain, LowPass, MidiFilter, MidiSource, TestSynth, Transpose},
-    enso_block::{Block, Child, Engine, LinkError, Linker, Ports, Registrar, Workstream},
-};
+use enso_audio::{AudioConfig, AudioEngine, AudioWorld, BlockAudioEngine, NodeDesc, NodeId};
 use enso_core::{Channel, MidiEvent, MidiMessage, PortId, Timestamp};
 
 #[global_allocator]
@@ -21,77 +17,26 @@ static ALLOCATOR: AllocDisabler = AllocDisabler;
 
 const CONFIG: AudioConfig = AudioConfig { sample_rate: 48_000, max_block: 128 };
 
-/// source → filter → transpose → synth(s) → low-pass → delay → gain → out.
-#[derive(Ports)]
-struct Patch {
-    synths: usize,
-    #[child]
-    source: Child<MidiSource>,
-    #[child(init = MidiFilter::new(None, None))]
-    filter: Child<MidiFilter>,
-    #[child]
-    transpose: Child<Transpose>,
-    voices: Vec<Child<TestSynth>>,
-    #[child(init = LowPass::new(CONFIG))]
-    low_pass: Child<LowPass>,
-    #[child(init = Delay::new(CONFIG))]
-    delay: Child<Delay>,
-    #[child(init = Gain::new(CONFIG))]
-    gain: Child<Gain>,
-    #[child(init = AudioOut::new(CONFIG))]
-    output: Child<AudioOut>,
-}
-
-impl Patch {
-    fn new(synths: usize) -> Self {
-        Self {
-            synths,
-            source: Child::default(),
-            filter: Child::default(),
-            transpose: Child::default(),
-            voices: Vec::new(),
-            low_pass: Child::default(),
-            delay: Child::default(),
-            gain: Child::default(),
-            output: Child::default(),
-        }
-    }
-}
-
-impl Block for Patch {
-    fn register(&mut self, r: &mut Registrar) {
-        self.voices = (0..self.synths).map(|i| r.child(format!("synth{i}"), TestSynth::new(CONFIG))).collect();
-    }
-    fn link(&mut self, l: &mut Linker) -> Result<(), LinkError> {
-        l.connect(l[self.source].out, l[self.filter].input)?;
-        l.connect(l[self.filter].out, l[self.transpose].input)?;
-        for &synth in &self.voices {
-            l.connect(l[self.transpose].out, l[synth].midi)?;
-            l.connect(l[synth].out, l[self.low_pass].input)?;
-        }
-        l.connect(l[self.low_pass].out, l[self.delay].input)?;
-        l.connect(l[self.delay].out, l[self.gain].input)?;
-        l.connect(l[self.gain].out, l[self.output].input)
-    }
-}
-
 #[test]
 fn the_audio_path_never_allocates() {
-    let mut engine = Engine::new();
-    let id = engine.add("audio", Workstream::build_realtime(Patch::new(1)).unwrap());
-    let root = engine.root::<Patch>(id).unwrap();
-    let midi = engine.sender(engine.get(root.source).unwrap().input).unwrap();
-    let output = engine.get(root.output).unwrap().input;
-    let cutoff = engine.get(root.low_pass).unwrap().cutoff;
-    let shift = engine.get(root.transpose).unwrap().semitones;
-    let delay_time = engine.get(root.delay).unwrap().time;
-    let mut driver = AudioDriver::new(engine.take(id).unwrap(), output, CONFIG);
+    let mut audio = BlockAudioEngine::new(CONFIG);
+    let midi_in = audio.create_node(&NodeDesc::MidiIn { port: None, channel: None }).unwrap();
+    let transpose = audio.create_node(&NodeDesc::Transpose).unwrap();
+    let low_pass = audio.create_node(&NodeDesc::LowPass).unwrap();
+    let delay = audio.create_node(&NodeDesc::Delay).unwrap();
+    let gain = audio.create_node(&NodeDesc::Gain).unwrap();
+    let mut synths: Vec<NodeId> = vec![audio.create_node(&NodeDesc::TestSynth).unwrap()];
+    let cutoff = audio.param::<f32>(low_pass, "cutoff").unwrap();
+    let shift = audio.param::<f32>(transpose, "semitones").unwrap();
+    let delay_time = audio.param::<f32>(delay, "time").unwrap();
+    let midi = audio.midi_sender();
 
     let channel = Channel::new(0).unwrap();
     // 480 frames: not a multiple of max_block, like a WASAPI period.
     let mut out = vec![0.0f32; 480 * 2];
     let period = Duration::from_secs_f64(480.0 / 48_000.0);
     let mut now = Timestamp::ZERO + Duration::from_secs(1);
+    let mut world = AudioWorld::new();
 
     for i in 0..300u32 {
         // A chord every few buffers, released later; plus pitch bend.
@@ -106,20 +51,38 @@ fn the_audio_path_never_allocates() {
             let bend = MidiMessage::PitchBend { channel, value: (i as i16 * 50) % 8000 };
             midi.send(MidiEvent { time: now, port: PortId(0), message: bend });
         }
-        // Control-side work (may allocate: it's not the audio thread).
-        engine.set(cutoff, 200.0 + 50.0 * (i % 100) as f32).unwrap();
-        engine.set(shift, (i % 13) as f32 - 6.0).unwrap();
-        engine.set(delay_time, 0.05 + 0.005 * (i % 50) as f32).unwrap();
-        if i % 60 == 30 {
-            engine.rebuild(id, Patch::new(1 + (i as usize / 60) % 3)).unwrap();
-        }
 
-        assert_no_alloc(|| driver.render(&mut out, 2, now));
+        // Control-side work (may allocate: it's not the audio thread).
+        // Every 60 buffers, a different number of synths: a rebuild.
+        if i % 60 == 30 {
+            let wanted = 1 + (i as usize / 60) % 3;
+            while synths.len() < wanted {
+                synths.push(audio.create_node(&NodeDesc::TestSynth).unwrap());
+            }
+            while synths.len() > wanted {
+                audio.destroy_node(synths.pop().unwrap());
+            }
+        }
+        // midi in → transpose → synth(s) → low-pass → delay → gain → speakers.
+        world.clear();
+        world.connect(midi_in, transpose);
+        for &synth in &synths {
+            world.connect(transpose, synth);
+            world.connect(synth, low_pass);
+        }
+        world.connect(low_pass, delay);
+        world.connect(delay, gain);
+        world.connect(gain, NodeId::SPEAKERS);
+        world.set_param(low_pass, cutoff, 200.0 + 50.0 * (i % 100) as f32);
+        world.set_param(transpose, shift, (i % 13) as f32 - 6.0);
+        world.set_param(delay, delay_time, 0.05 + 0.005 * (i % 50) as f32);
+        audio.submit(&world).unwrap();
+
+        assert_no_alloc(|| audio.render(&mut out, 2, now));
         now = now + period;
-        engine.collect_garbage();
     }
 
-    let stats = driver.stats().read();
+    let stats = audio.stats();
     assert_eq!(stats.callbacks, 300);
     assert_eq!(stats.disabled_blocks, 0);
     assert!(out.iter().any(|s| *s != 0.0), "it made sound");

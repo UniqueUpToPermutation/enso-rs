@@ -1,59 +1,84 @@
 //! [`PatchEditor`]: the audio patch as a node graph you can rewire with
-//! the mouse, applied to the running audio workstream.
+//! the mouse, applied to an [`AudioEngine`].
 //!
 //! The graph (egui-snarl's `Snarl<PatchNode>`) is the source of truth.
-//! [`PatchEditor::sync`] turns it into a [`PatchSpec`] after every frame and,
-//! when that changed, rebuilds the audio workstream from it
-//! (`Engine::rebuild`). Blocks that survive keep their state, so rewiring
-//! doesn't cut notes or echoes. Knob changes don't rebuild: they're sent
-//! with `Engine::set_id`.
+//! [`PatchEditor::sync`] creates, updates and destroys the engine's nodes to
+//! match it, then submits an [`AudioWorld`] with its wires and knob values.
+//! The engine works out what changed: rewiring rebuilds the audio graph
+//! (nodes keep their state, so notes and echoes aren't cut), knob changes
+//! are just sent.
 
 use egui::{Color32, Ui, pos2};
 use egui_snarl::{
     InPin, InPinId, NodeId as GraphNodeId, OutPin, OutPinId, Snarl,
-    ui::{PinInfo, SnarlPin, SnarlStyle, SnarlViewer, SnarlWidget},
+    ui::{PinInfo as SnarlPinInfo, SnarlPin, SnarlStyle, SnarlViewer, SnarlWidget},
 };
 use enso_audio::{
-    AudioConfig,
-    enso_block::{BlockId, Engine, InterfaceId, WorkstreamId},
+    AudioEngine, AudioError, AudioWorld, InputPin, NodeDesc, NodeId, OutputPin, Param, ParamInfo, PinInfo,
+    SPEAKER_INPUTS, Signal,
 };
 use enso_core::{Channel, PortId};
 
-use crate::patch::{Endpoint, KnobSpec, NodeKind, PatchRoot, PatchSpec, Signal};
+/// Offered in the "add node" menu, in this order (`None`: the speakers).
+const MENU: [Option<NodeDesc>; 7] = [
+    Some(NodeDesc::MidiIn { port: None, channel: None }),
+    Some(NodeDesc::Transpose),
+    Some(NodeDesc::TestSynth),
+    Some(NodeDesc::LowPass),
+    Some(NodeDesc::Delay),
+    Some(NodeDesc::Gain),
+    None,
+];
 
-impl Signal {
-    fn name(self) -> &'static str {
-        match self {
-            Signal::Midi => "midi",
-            Signal::Audio => "audio",
-        }
+fn signal_name(signal: Signal) -> &'static str {
+    match signal {
+        Signal::Midi => "midi",
+        Signal::Audio => "audio",
     }
+}
 
-    fn pin(self) -> PinInfo {
-        match self {
-            Signal::Midi => PinInfo::square().with_fill(Color32::from_rgb(235, 165, 60)),
-            Signal::Audio => PinInfo::circle().with_fill(Color32::from_rgb(90, 170, 240)),
-        }
+fn signal_pin(signal: Signal) -> SnarlPinInfo {
+    match signal {
+        Signal::Midi => SnarlPinInfo::square().with_fill(Color32::from_rgb(235, 165, 60)),
+        Signal::Audio => SnarlPinInfo::circle().with_fill(Color32::from_rgb(90, 170, 240)),
     }
 }
 
 /// One node of the editor's graph.
 pub struct PatchNode {
-    kind: NodeKind,
-    /// The UUID of the node's block: stable for the node's lifetime, so the
-    /// block keeps its state across rebuilds.
-    id: BlockId,
+    /// `None`: the speakers (an "Output" node; there may be several, all
+    /// standing for [`NodeId::SPEAKERS`]).
+    desc: Option<NodeDesc>,
+    /// The engine's node, once [`PatchEditor::sync`] has created it.
+    id: Option<NodeId>,
+    /// The configuration the engine has, to notice changes (e.g. the MIDI
+    /// channel picked in the node).
+    applied: Option<NodeDesc>,
     /// Current knob values (what the sliders show).
-    knobs: Vec<(KnobSpec, f32)>,
+    knobs: Vec<(ParamInfo, f32)>,
 }
 
 impl PatchNode {
-    pub fn new(kind: NodeKind) -> Self {
-        Self { kind, id: BlockId::random(), knobs: kind.knobs().into_iter().map(|k| (k, k.default)).collect() }
+    pub fn new(desc: Option<NodeDesc>) -> Self {
+        let knobs = desc.map_or(&[][..], |d| d.params()).iter().map(|p| (p.clone(), p.default)).collect();
+        Self { desc, id: None, applied: None, knobs }
     }
 
-    pub fn kind(&self) -> NodeKind {
-        self.kind
+    /// `None` for the speakers.
+    pub fn desc(&self) -> Option<NodeDesc> {
+        self.desc
+    }
+
+    fn title(&self) -> &'static str {
+        self.desc.map_or("Output", |d| d.title())
+    }
+
+    fn inputs(&self) -> &'static [PinInfo] {
+        self.desc.map_or(SPEAKER_INPUTS, |d| d.inputs())
+    }
+
+    fn outputs(&self) -> &'static [PinInfo] {
+        self.desc.map_or(&[], |d| d.outputs())
     }
 }
 
@@ -66,40 +91,45 @@ pub struct MidiPort {
 
 /// The patch editor: show it every frame, then [`sync`](Self::sync) it.
 pub struct PatchEditor {
-    config: AudioConfig,
     graph: Snarl<PatchNode>,
-    /// The spec last sent to the engine (or attempted: a failing spec isn't
-    /// retried every frame).
-    attempted: Option<PatchSpec>,
-    /// Knob changes made in the UI, sent at the next `sync`.
-    knob_changes: Vec<(InterfaceId, f32)>,
+    /// Engine nodes this editor created (to destroy those whose graph
+    /// node was removed).
+    created: Vec<NodeId>,
+    /// Refilled at every sync (keeps its memory).
+    world: AudioWorld,
     error: Option<String>,
     style: SnarlStyle,
 }
 
+impl Default for PatchEditor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PatchEditor {
     /// An empty graph.
-    pub fn new(config: AudioConfig) -> Self {
+    pub fn new() -> Self {
         let style = SnarlStyle { collapsible: Some(true), ..SnarlStyle::new() };
-        Self { config, graph: Snarl::new(), attempted: None, knob_changes: Vec::new(), error: None, style }
+        Self { graph: Snarl::new(), created: Vec::new(), world: AudioWorld::new(), error: None, style }
     }
 
     /// A playable starting point:
     /// MIDI in → test synth → low-pass → delay → gain → output.
-    pub fn with_starter_patch(config: AudioConfig) -> Self {
-        let mut editor = Self::new(config);
+    pub fn with_starter_patch() -> Self {
+        let mut editor = Self::new();
         let chain = [
-            NodeKind::MidiIn { port: None, channel: None },
-            NodeKind::TestSynth,
-            NodeKind::LowPass,
-            NodeKind::Delay,
-            NodeKind::Gain,
-            NodeKind::Output,
+            Some(NodeDesc::MidiIn { port: None, channel: None }),
+            Some(NodeDesc::TestSynth),
+            Some(NodeDesc::LowPass),
+            Some(NodeDesc::Delay),
+            Some(NodeDesc::Gain),
+            None,
         ];
         let mut previous: Option<GraphNodeId> = None;
-        for (i, kind) in chain.into_iter().enumerate() {
+        for (i, desc) in chain.into_iter().enumerate() {
             let at = pos2(40.0 + 230.0 * i as f32, 120.0 + 40.0 * (i % 2) as f32);
-            let node = editor.graph.insert_node(at, PatchNode::new(kind));
+            let node = editor.graph.insert_node(at, PatchNode::new(desc));
             if let Some(previous) = previous {
                 editor.graph.connect(OutPinId { node: previous, output: 0 }, InPinId { node, input: 0 });
             }
@@ -108,15 +138,7 @@ impl PatchEditor {
         editor
     }
 
-    /// The root block for the graph as it is now: build the audio
-    /// workstream from this at startup.
-    pub fn root(&mut self) -> PatchRoot {
-        let spec = self.spec();
-        self.attempted = Some(spec.clone());
-        PatchRoot::new(self.config, spec)
-    }
-
-    /// Why the last change couldn't be applied (e.g. a cycle), if it couldn't.
+    /// Why the graph couldn't be applied (e.g. a cycle), if it couldn't.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -124,91 +146,120 @@ impl PatchEditor {
     /// Draw the graph. Right-click the background to add nodes, right-click
     /// a node to remove it, drag between pins to wire.
     pub fn show(&mut self, ui: &mut Ui, ports: &[MidiPort]) {
-        let mut viewer = Viewer { ports, knob_changes: &mut self.knob_changes };
+        let mut viewer = Viewer { ports };
         SnarlWidget::new().id_salt("patch-editor").style(self.style).show(&mut self.graph, &mut viewer, ui);
     }
 
-    /// Apply the graph to the audio workstream `audio`: rebuild it if the
-    /// wiring or the set of nodes changed, and send knob changes.
-    pub fn sync(&mut self, engine: &mut Engine, audio: WorkstreamId) {
-        let spec = self.spec();
-        if self.attempted.as_ref() != Some(&spec) {
-            self.attempted = Some(spec.clone());
-            match engine.rebuild(audio, PatchRoot::new(self.config, spec)) {
-                Ok(()) => self.error = None,
-                Err(err) => self.error = Some(err.to_string()),
-            }
-        }
-        for (id, value) in self.knob_changes.drain(..) {
-            // A knob of a node whose rebuild failed isn't there yet: ignore.
-            if let Err(err) = engine.set_id(id, value) {
-                log::debug!("knob not applied: {err}");
-            }
-        }
-    }
+    /// Apply the graph to `audio`: create, update and destroy nodes, then
+    /// submit the wiring and knob values. Call it every frame; unchanged
+    /// graphs cost little.
+    pub fn sync(&mut self, audio: &mut impl AudioEngine) {
+        let mut problem = None;
 
-    /// What the graph describes.
-    fn spec(&self) -> PatchSpec {
-        let nodes = self.graph.nodes().filter(|n| n.kind != NodeKind::Output).map(|n| (n.id, n.kind)).collect();
-        let wires = self
-            .graph
-            .wires()
-            .filter_map(|(out, input)| {
-                let (from, to) = (self.graph.get_node(out.node)?, self.graph.get_node(input.node)?);
-                let from = Endpoint::Pin(from.id, from.kind.outputs().get(out.output)?.key);
-                let to = match to.kind {
-                    NodeKind::Output => Endpoint::Output,
-                    kind => Endpoint::Pin(to.id, kind.inputs().get(input.input)?.key),
-                };
-                Some((from, to))
-            })
-            .collect();
-        PatchSpec { nodes, wires }
+        // Nodes.
+        let mut live = Vec::new();
+        for node in self.graph.nodes_mut() {
+            let Some(desc) = node.desc else {
+                node.id = Some(NodeId::SPEAKERS);
+                continue;
+            };
+            match node.id {
+                None => match audio.create_node(&desc) {
+                    Ok(id) => {
+                        node.id = Some(id);
+                        node.applied = Some(desc);
+                        self.created.push(id);
+                    }
+                    Err(err) => problem = Some(err),
+                },
+                Some(id) if node.applied != Some(desc) => {
+                    node.applied = Some(desc);
+                    if let Err(err) = audio.update_node(id, &desc) {
+                        problem = Some(err);
+                    }
+                }
+                Some(_) => {}
+            }
+            live.extend(node.id);
+        }
+        self.created.retain(|id| {
+            let keep = live.contains(id);
+            if !keep {
+                audio.destroy_node(*id);
+            }
+            keep
+        });
+
+        // Wires and knobs.
+        self.world.clear();
+        for (out, input) in self.graph.wires() {
+            let (Some(from), Some(to)) = (self.graph.get_node(out.node), self.graph.get_node(input.node)) else {
+                continue;
+            };
+            let (Some(from), Some(to)) = (from.id, to.id) else { continue };
+            self.world.connect(
+                OutputPin { node: from, index: out.output as u16 },
+                InputPin { node: to, index: input.input as u16 },
+            );
+        }
+        for node in self.graph.nodes() {
+            let Some(id) = node.id else { continue };
+            for (info, value) in &node.knobs {
+                self.world.set_param(id, Param::<f32>::new(&info.name), *value);
+            }
+        }
+
+        match audio.submit(&self.world) {
+            Ok(()) => {}
+            // Transient: the audio thread will catch up; keep what's shown.
+            Err(AudioError::Busy) => return,
+            Err(err) => problem = Some(err),
+        }
+        self.error = problem.map(|err| err.to_string());
     }
 }
 
 /// Tells egui-snarl how to draw and edit `PatchNode`s.
 struct Viewer<'a> {
     ports: &'a [MidiPort],
-    knob_changes: &'a mut Vec<(InterfaceId, f32)>,
 }
 
 impl SnarlViewer<PatchNode> for Viewer<'_> {
     fn title(&mut self, node: &PatchNode) -> String {
-        node.kind.title().to_owned()
+        node.title().to_owned()
     }
 
     fn inputs(&mut self, node: &PatchNode) -> usize {
-        node.kind.inputs().len()
+        node.inputs().len()
     }
 
     fn outputs(&mut self, node: &PatchNode) -> usize {
-        node.kind.outputs().len()
+        node.outputs().len()
     }
 
     fn show_input(&mut self, pin: &InPin, ui: &mut Ui, snarl: &mut Snarl<PatchNode>) -> impl SnarlPin + 'static {
-        let signal = snarl[pin.id.node].kind.inputs()[pin.id.input].signal;
-        ui.label(signal.name());
-        signal.pin()
+        let signal = snarl[pin.id.node].inputs()[pin.id.input].signal;
+        ui.label(signal_name(signal));
+        signal_pin(signal)
     }
 
     fn show_output(&mut self, pin: &OutPin, ui: &mut Ui, snarl: &mut Snarl<PatchNode>) -> impl SnarlPin + 'static {
-        let signal = snarl[pin.id.node].kind.outputs()[pin.id.output].signal;
-        ui.label(signal.name());
-        signal.pin()
+        let signal = snarl[pin.id.node].outputs()[pin.id.output].signal;
+        ui.label(signal_name(signal));
+        signal_pin(signal)
     }
 
-    /// Only same-kind pins connect.
+    /// Only same-signal pins connect.
     fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<PatchNode>) {
-        let out = snarl[from.id.node].kind.outputs()[from.id.output].signal;
-        let into = snarl[to.id.node].kind.inputs()[to.id.input].signal;
+        let out = snarl[from.id.node].outputs()[from.id.output].signal;
+        let into = snarl[to.id.node].inputs()[to.id.input].signal;
         if out == into {
             snarl.connect(from.id, to.id);
         }
     }
 
     fn has_body(&mut self, node: &PatchNode) -> bool {
-        !node.knobs.is_empty() || matches!(node.kind, NodeKind::MidiIn { .. })
+        !node.knobs.is_empty() || matches!(node.desc, Some(NodeDesc::MidiIn { .. }))
     }
 
     fn show_body(
@@ -220,19 +271,16 @@ impl SnarlViewer<PatchNode> for Viewer<'_> {
         snarl: &mut Snarl<PatchNode>,
     ) {
         let patch_node = &mut snarl[node];
-        let block = patch_node.id;
         ui.vertical(|ui| {
-            if let NodeKind::MidiIn { port, channel } = &mut patch_node.kind {
+            if let Some(NodeDesc::MidiIn { port, channel }) = &mut patch_node.desc {
                 midi_filter_ui(ui, node, self.ports, port, channel);
             }
-            for (spec, value) in &mut patch_node.knobs {
-                let slider = egui::Slider::new(value, spec.range.0..=spec.range.1)
-                    .logarithmic(spec.logarithmic)
-                    .suffix(spec.suffix)
-                    .text(spec.label);
-                if ui.add(slider).changed() {
-                    self.knob_changes.push((InterfaceId { block, key: spec.key }, *value));
-                }
+            for (info, value) in &mut patch_node.knobs {
+                let slider = egui::Slider::new(value, info.min..=info.max)
+                    .logarithmic(info.logarithmic)
+                    .suffix(info.unit.as_ref())
+                    .text(info.label.as_ref());
+                ui.add(slider);
             }
         });
     }
@@ -243,9 +291,10 @@ impl SnarlViewer<PatchNode> for Viewer<'_> {
 
     fn show_graph_menu(&mut self, pos: egui::Pos2, ui: &mut Ui, snarl: &mut Snarl<PatchNode>) {
         ui.label("Add node");
-        for kind in NodeKind::MENU {
-            if ui.button(kind.title()).clicked() {
-                snarl.insert_node(pos, PatchNode::new(kind));
+        for desc in MENU {
+            let node = PatchNode::new(desc);
+            if ui.button(node.title()).clicked() {
+                snarl.insert_node(pos, node);
                 ui.close();
             }
         }
@@ -264,7 +313,7 @@ impl SnarlViewer<PatchNode> for Viewer<'_> {
         snarl: &mut Snarl<PatchNode>,
     ) {
         if ui.button("Remove").clicked() {
-            // Its block goes at the next `sync` (the rebuild leaves it out).
+            // Its engine node is destroyed at the next `sync`.
             snarl.remove_node(node);
             ui.close();
         }
@@ -304,30 +353,20 @@ fn midi_filter_ui(
 mod tests {
     use std::time::Duration;
 
-    use enso_audio::{AudioDriver, enso_block::Workstream};
+    use enso_audio::{AudioConfig, BlockAudioEngine};
     use enso_core::{MidiEvent, MidiMessage, Timestamp};
 
     use super::*;
 
     const CONFIG: AudioConfig = AudioConfig { sample_rate: 48_000, max_block: 512 };
 
-    /// Build the editor's patch into an engine and an offline driver.
-    fn run(editor: &mut PatchEditor) -> (Engine, WorkstreamId, AudioDriver, enso_audio::enso_block::MailSender<MidiEvent>) {
-        let mut engine = Engine::new();
-        let id = engine.add("audio", Workstream::build_realtime(editor.root()).unwrap());
-        let root = engine.root::<PatchRoot>(id).unwrap();
-        let midi = engine.sender(engine.get(root.source).unwrap().input).unwrap();
-        let output = engine.get(root.output).unwrap().input;
-        let driver = AudioDriver::new(engine.take(id).unwrap(), output, CONFIG);
-        (engine, id, driver, midi)
-    }
-
     /// Renders `buffers` 10 ms buffers from `first`; returns the peak level.
-    fn peak(driver: &mut AudioDriver, first: u64, buffers: u64) -> f32 {
+    fn peak(audio: &mut BlockAudioEngine, first: u64, buffers: u64) -> f32 {
         let mut out = vec![0.0; 480 * 2];
         let mut peak = 0.0f32;
         for i in first..first + buffers {
-            driver.render(&mut out, 2, Timestamp::ZERO + Duration::from_millis(1000 + 10 * i));
+            audio.render(&mut out, 2, Timestamp::ZERO + Duration::from_millis(1000 + 10 * i));
+            audio.collect_garbage();
             peak = out.iter().fold(peak, |p, s| p.max(s.abs()));
         }
         peak
@@ -338,53 +377,57 @@ mod tests {
         MidiEvent { time: Timestamp::ZERO + Duration::from_millis(1000), port: PortId(3), message }
     }
 
-    #[test]
-    fn starter_patch_plays() {
-        let mut editor = PatchEditor::with_starter_patch(CONFIG);
-        let (_engine, _, mut driver, midi) = run(&mut editor);
-        midi.send(note(60));
-        assert!(peak(&mut driver, 0, 20) > 0.01);
+    fn find(editor: &PatchEditor, desc: Option<NodeDesc>) -> GraphNodeId {
+        editor.graph.node_ids().find(|(_, n)| n.desc == desc).unwrap().0
     }
 
     #[test]
-    fn rewiring_rebuilds_and_keeps_sounding() {
-        let mut editor = PatchEditor::with_starter_patch(CONFIG);
-        let (mut engine, id, mut driver, midi) = run(&mut editor);
-        midi.send(note(60));
-        peak(&mut driver, 0, 5);
-
-        // Remove the delay: a rebuild; the synth's note keeps sounding,
-        // but the chain is broken (filter no longer reaches the output).
-        let delay = editor.graph.node_ids().find(|(_, n)| n.kind == NodeKind::Delay).unwrap().0;
-        editor.graph.remove_node(delay);
-        editor.sync(&mut engine, id);
+    fn starter_patch_plays() {
+        let mut editor = PatchEditor::with_starter_patch();
+        let mut audio = BlockAudioEngine::new(CONFIG);
+        editor.sync(&mut audio);
         assert_eq!(editor.error(), None);
-        assert!(peak(&mut driver, 5, 5) < 1e-3, "the gain lost its input");
+        audio.midi_sender().send(note(60));
+        assert!(peak(&mut audio, 0, 20) > 0.01);
+    }
+
+    #[test]
+    fn rewiring_keeps_sounding() {
+        let mut editor = PatchEditor::with_starter_patch();
+        let mut audio = BlockAudioEngine::new(CONFIG);
+        editor.sync(&mut audio);
+        audio.midi_sender().send(note(60));
+        peak(&mut audio, 0, 5);
+
+        // Remove the delay: its node is destroyed and the chain is broken.
+        editor.graph.remove_node(find(&editor, Some(NodeDesc::Delay)));
+        editor.sync(&mut audio);
+        assert_eq!(editor.error(), None);
+        assert_eq!(editor.created.len(), 4);
+        assert!(peak(&mut audio, 5, 5) < 1e-3, "the gain lost its input");
 
         // Wire filter → gain directly: sound again, from the same note.
-        let find = |kind| editor.graph.node_ids().find(|(_, n)| n.kind == kind).unwrap().0;
-        let (filter, gain) = (find(NodeKind::LowPass), find(NodeKind::Gain));
+        let (filter, gain) = (find(&editor, Some(NodeDesc::LowPass)), find(&editor, Some(NodeDesc::Gain)));
         editor.graph.connect(OutPinId { node: filter, output: 0 }, InPinId { node: gain, input: 0 });
-        editor.sync(&mut engine, id);
-        assert!(peak(&mut driver, 10, 5) > 0.01, "the synth's voice survived two rebuilds");
+        editor.sync(&mut audio);
+        assert!(peak(&mut audio, 10, 5) > 0.01, "the synth's voice survived two rebuilds");
 
         // A cycle: rejected, reported, and the old patch keeps playing.
         editor.graph.connect(OutPinId { node: gain, output: 0 }, InPinId { node: filter, input: 0 });
-        editor.sync(&mut engine, id);
+        editor.sync(&mut audio);
         assert!(editor.error().is_some_and(|e| e.contains("cycle")), "{:?}", editor.error());
-        assert!(peak(&mut driver, 15, 5) > 0.01);
+        assert!(peak(&mut audio, 15, 5) > 0.01);
     }
 
     #[test]
-    fn knobs_reach_their_blocks() {
-        let mut editor = PatchEditor::with_starter_patch(CONFIG);
-        let (mut engine, id, mut driver, midi) = run(&mut editor);
-        let gain = editor.graph.nodes().find(|n| n.kind == NodeKind::Gain).unwrap();
-        let volume = InterfaceId { block: gain.id, key: gain.knobs[0].0.key };
-        editor.knob_changes.push((volume, -60.0));
-        editor.sync(&mut engine, id);
-        midi.send(note(60));
-        peak(&mut driver, 0, 20); // let the gain glide down
-        assert!(peak(&mut driver, 20, 5) < 1e-3, "-60 dB silences the patch");
+    fn knobs_reach_their_nodes() {
+        let mut editor = PatchEditor::with_starter_patch();
+        let mut audio = BlockAudioEngine::new(CONFIG);
+        let gain = find(&editor, Some(NodeDesc::Gain));
+        editor.graph[gain].knobs[0].1 = -60.0;
+        editor.sync(&mut audio);
+        audio.midi_sender().send(note(60));
+        peak(&mut audio, 0, 20); // let the gain glide down
+        assert!(peak(&mut audio, 20, 5) < 1e-3, "-60 dB silences the patch");
     }
 }

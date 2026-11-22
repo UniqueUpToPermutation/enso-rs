@@ -7,7 +7,7 @@ use cpal::{
 };
 use enso_core::Clock;
 
-use crate::{AudioConfig, AudioDriver};
+use crate::{AudioConfig, driver::AudioDriver};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceError {
@@ -86,7 +86,7 @@ impl OutputDevice {
         self.config.channels
     }
 
-    /// The config to build the audio blocks and the [`AudioDriver`] with.
+    /// The config to create the [`BlockAudioEngine`](crate::BlockAudioEngine) with.
     pub fn audio_config(&self) -> AudioConfig {
         AudioConfig::new(self.config.sample_rate)
     }
@@ -94,7 +94,7 @@ impl OutputDevice {
     /// Start playing: `driver` moves to the audio thread. Sound stops
     /// when the returned stream is dropped. `clock` must be the clock your
     /// MIDI events are stamped with.
-    pub fn start(self, driver: AudioDriver, clock: Clock) -> Result<AudioStream, DeviceError> {
+    pub(crate) fn start(self, driver: AudioDriver, clock: Clock) -> Result<AudioStream, DeviceError> {
         let rate = driver.config().sample_rate;
         if rate != self.config.sample_rate {
             return Err(DeviceError::SampleRateMismatch { driver: rate, device: self.config.sample_rate });

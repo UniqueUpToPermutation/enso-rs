@@ -55,8 +55,4 @@ impl Smoothed {
         self.value = target + (self.value - target) * self.coef;
         self.value
     }
-
-    pub fn value(&self) -> f32 {
-        self.value
-    }
 }

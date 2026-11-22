@@ -15,9 +15,9 @@ behind Rust/Cargo choices briefly when you make them.
 | `crates/enso-visual` | Working: wgpu renderer with sky, static mesh, skinned mesh, sprite/billboard and MSDF text subrenderers, named shader parameters, interpolated `RenderWorld` API, examples with golden tests |
 | `crates/enso-core` | Working: `Clock`/`Timestamp`, MIDI message types (parse/encode) |
 | `crates/enso-io` | Working: hot-pluggable timestamped MIDI inputs, MIDI output. Asset loading planned |
-| `crates/enso-audio` | Working, on blocks: audio blocks (MIDI source/filter, test synth, filter, delay, gain, transpose, output), `AudioDriver` stepping a real-time workstream, cpal output, offline rendering, no-alloc test |
+| `crates/enso-audio` | Working: `AudioEngine` trait (nodes → `NodeId`s, named params, plain-data `AudioWorld` per tick, live `MidiSender`) implemented by `BlockAudioEngine` on a real-time block workstream; test synth, filter, delay, gain, transpose; cpal output, offline rendering, no-alloc test |
 | `crates/enso-block` (+ `enso-block-derive`) | Block platform steps 1–3: blocks, ports, interfaces, linking, `Workstream`, `#[derive(Ports)]`, mailboxes, `Engine`, rebuilding while running. Audio runs on it; ECS and sim next |
-| `crates/enso-ui` | Working: `PatchEditor` (egui-snarl) building a data-defined `PatchRoot`, rebuilt live as you rewire |
+| `crates/enso-ui` | Working: `PatchEditor` (egui-snarl), written against `AudioEngine`, applied live as you rewire |
 | `crates/enso` (bin) | Working: eframe app with the patch editor, audio output and MIDI |
 | `enso-engine` (ECS), `enso-plugin` (VST3) | Planned, not created yet. See [architecture](docs/agents/architecture.md) |
 | `third_party/` | Vendored egui-snarl + egui-scale, ported to egui 0.37. See its README |
@@ -53,6 +53,11 @@ cargo doc -p enso-visual --no-deps --open           # browse the public API
   the fake in `tests/renderer_trait.rs`.
 - **Subrenderers are private.** Users interact through `Renderer` (resource
   creation, `render`) and plain-data `RenderWorld`s. Don't re-expose them.
+- **`AudioEngine` is a trait** (`enso-audio/src/lib.rs`) implemented by
+  `BlockAudioEngine`, the audio twin of `Renderer`: new methods go on the
+  trait (with docs), then the impl, then the fake in
+  `tests/audio_engine_trait.rs`. Blocks, `AudioDriver` and `enso_block`
+  stay private; `AudioWorld` stays plain data.
 - **`RenderWorld` must stay plain data:** IDs, numbers, glam types. No wgpu
   handles, no `Arc`s to GPU objects. It is meant to be built on the
   simulation thread and may move to `enso-core`.

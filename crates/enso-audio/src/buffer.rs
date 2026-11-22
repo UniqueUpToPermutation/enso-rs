@@ -32,6 +32,7 @@ impl AudioBuf {
     }
 
     /// Frames written this step.
+    #[allow(dead_code)] // part of the block-author API; tests use it
     pub fn frames(&self) -> usize {
         self.frames
     }
@@ -60,13 +61,6 @@ impl AudioBuf {
         self.frames = frames;
         let [left, right] = &mut self.channels;
         [&mut left[..frames], &mut right[..frames]]
-    }
-
-    /// Write `frames` frames of silence.
-    pub fn silence(&mut self, frames: usize) {
-        for channel in self.write(frames) {
-            channel.fill(0.0);
-        }
     }
 }
 

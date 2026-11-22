@@ -1272,7 +1272,6 @@ dependencies = [
  "egui",
  "egui-snarl",
  "enso-audio",
- "enso-block",
  "enso-core",
  "log",
 ]

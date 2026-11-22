@@ -173,6 +173,22 @@ the same window later goes through eframe's wgpu render state. Knobs are
 towards a general parameter system. New audio nodes: Gain, LowPass (TPT
 SVF), Delay, Transpose (MIDI).
 
+**2026-11-22: The audio engine's interface mirrors the renderer's; blocks
+are private.** (Owner asked for "a clear interface in a similar way to the
+visual engine", with blocks underneath.) An `AudioEngine` trait,
+implemented by `BlockAudioEngine`, with nodes as resources (`NodeId`s,
+never reused), checked named `Param<T>` handles, and a plain-data
+`AudioWorld` submitted per tick. Owner's choices:
+**declarative** (the world is the whole wiring each tick and the engine
+diffs; consistent with `RenderWorld` and the ECS's staged changes), a
+**free graph** (any output into any same-signal input; the editor needs
+it), and **sequencing on the audio thread** (a future sequencer is a node,
+for minimal latency; live MIDI goes through `MidiSender`, not ticks).
+Parameters persist between worlds rather than resetting, so a tick that
+forgets one doesn't make the sound jump. A world that can't be built keeps
+the previous wiring playing and returns its error until the world changes.
+enso-ui now depends only on the trait.
+
 ## Open proposals (not decided)
 
 - Winit-free `WindowSurface` helper in enso-visual for surface boilerplate.

@@ -1,14 +1,16 @@
-//! The audio blocks and driver, rendered offline: `AudioDriver::render`
+//! Block-level tests (the blocks and driver are private), rendered offline: `AudioDriver::render`
 //! with chosen timestamps, so timing is exact and no sound card is needed.
 //! Patches run in a real-time workstream controlled by an `Engine`, as in
 //! the app.
 
 use std::time::Duration;
 
-use enso_audio::{
-    AudioBuf, AudioConfig, AudioContext, AudioDriver, MidiEvents,
+use enso_block::{Block, Child, Engine, In, Io, LinkError, Linker, MailSender, Out, Ports, Workstream, WorkstreamId};
+
+use crate::{
+    AudioBuf, AudioConfig, AudioContext, MidiEvents,
     blocks::{AudioOut, Gain, MidiFilter, MidiSource, TestSynth, Transpose},
-    enso_block::{Block, Child, Engine, In, Io, LinkError, Linker, MailSender, Out, Ports, Workstream, WorkstreamId},
+    driver::AudioDriver,
     midi_events,
 };
 use enso_core::{Channel, MidiEvent, MidiMessage, PortId, Timestamp};
@@ -93,7 +95,7 @@ impl<I: Instrument> Chain<I> {
 }
 
 impl<I: Instrument> Block for Chain<I> {
-    fn register(&mut self, r: &mut enso_audio::enso_block::Registrar) {
+    fn register(&mut self, r: &mut enso_block::Registrar) {
         let instrument = self.instrument_value.take().expect("registered once");
         self.instrument = r.child("instrument", instrument);
     }

@@ -55,6 +55,7 @@ impl AudioContext {
     }
 
     /// The time of frame `frame` of this step.
+    #[allow(dead_code)] // part of the block-author API; tests use it
     pub fn time_of(&self, frame: usize) -> Timestamp {
         self.start + Duration::from_secs_f64(frame as f64 / f64::from(self.sample_rate))
     }
